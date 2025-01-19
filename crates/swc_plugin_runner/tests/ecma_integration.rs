@@ -107,14 +107,14 @@ fn internal() {
         testing::run_test(false, |cm, _handler| {
             eprint!("First run start");
 
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let program = parse_file_as_program(
                 &fm,
                 Syntax::Es(Default::default()),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 
@@ -175,14 +175,14 @@ fn internal() {
         // run single plugin with handler
         testing::run_test2(false, |cm, handler| {
             eprintln!("Second run start");
-            let fm = cm.new_source_file(FileName::Anon, "console.log(foo)".into());
+            let fm = cm.new_source_file(FileName::Anon.into(), "console.log(foo)".into());
 
             let program = parse_file_as_program(
                 &fm,
                 Syntax::Es(Default::default()),
                 EsVersion::latest(),
                 None,
-                &mut vec![],
+                &mut Vec::new(),
             )
             .unwrap();
 

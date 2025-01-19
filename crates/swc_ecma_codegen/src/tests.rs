@@ -5,7 +5,7 @@ use swc_ecma_parser;
 use swc_ecma_testing::{exec_node_js, JsExecOptions};
 use testing::DebugUsingDisplay;
 
-use self::swc_ecma_parser::{EsConfig, Parser, StringInput, Syntax};
+use self::swc_ecma_parser::{EsSyntax, Parser, StringInput, Syntax};
 use super::*;
 use crate::text_writer::omit_trailing_semi;
 
@@ -16,7 +16,7 @@ struct Builder {
 }
 
 impl Builder {
-    pub fn with<'a, F, Ret>(self, _: &str, s: &'a mut Vec<u8>, op: F) -> Ret
+    pub fn with<'a, F, Ret>(self, _: &str, s: &'a mut std::vec::Vec<u8>, op: F) -> Ret
     where
         F: for<'aa> FnOnce(&mut Emitter<'aa, Box<(dyn WriteJs + 'aa)>, SourceMap>) -> Ret,
         Ret: 'static,
@@ -44,7 +44,7 @@ impl Builder {
     where
         F: for<'aa> FnOnce(&mut Emitter<'aa, Box<(dyn WriteJs + 'aa)>, SourceMap>),
     {
-        let mut buf = vec![];
+        let mut buf = std::vec::Vec::new();
 
         self.with(src, &mut buf, op);
 
@@ -54,7 +54,7 @@ impl Builder {
 
 fn parse_then_emit(from: &str, cfg: Config, syntax: Syntax) -> String {
     ::testing::run_test(false, |cm, handler| {
-        let src = cm.new_source_file(FileName::Real("custom.js".into()), from.to_string());
+        let src = cm.new_source_file(FileName::Real("custom.js".into()).into(), from.to_string());
         println!(
             "--------------------\nSource: \n{}\nPos: {:?} ~ {:?}\n",
             from, src.start_pos, src.end_pos
@@ -305,7 +305,7 @@ fn export_namespace_from() {
         "export * as Foo from 'foo';",
         "export * as Foo from 'foo';",
         Default::default(),
-        Syntax::Es(EsConfig::default()),
+        Syntax::Es(EsSyntax::default()),
     );
 }
 
@@ -318,7 +318,7 @@ fn export_namespace_from_min() {
             minify: true,
             ..Default::default()
         },
-        Syntax::Es(EsConfig::default()),
+        Syntax::Es(EsSyntax::default()),
     );
 }
 
@@ -328,9 +328,9 @@ fn named_and_namespace_export_from() {
         "export * as Foo, { bar } from 'foo';",
         "export * as Foo, { bar } from 'foo';",
         Default::default(),
-        Syntax::Es(EsConfig {
+        Syntax::Es(EsSyntax {
             export_default_from: true,
-            ..EsConfig::default()
+            ..EsSyntax::default()
         }),
     );
 }
@@ -344,9 +344,9 @@ fn named_and_namespace_export_from_min() {
             minify: true,
             ..Default::default()
         },
-        Syntax::Es(EsConfig {
+        Syntax::Es(EsSyntax {
             export_default_from: true,
-            ..EsConfig::default()
+            ..EsSyntax::default()
         }),
     );
 }
@@ -508,7 +508,7 @@ fn jsx_1() {
         "<Foo title=\"name\" desc=\"<empty>\" bool it>foo</Foo>;",
         "<Foo title=\"name\" desc=\"<empty>\" bool it>foo</Foo>;",
         Default::default(),
-        Syntax::Es(EsConfig {
+        Syntax::Es(EsSyntax {
             jsx: true,
             ..Default::default()
         }),
@@ -962,6 +962,19 @@ fn issue_8491_2() {
     );
 }
 
+#[test]
+fn issue_9630() {
+    test_from_to_custom_config(
+        "console.log(1 / /* @__PURE__ */ something())",
+        "console.log(1/ /* @__PURE__ */something())",
+        Config {
+            minify: true,
+            ..Default::default()
+        },
+        Default::default(),
+    );
+}
+
 #[testing::fixture("tests/str-lits/**/*.txt")]
 fn test_str_lit(input: PathBuf) {
     test_str_lit_inner(input)
@@ -974,7 +987,7 @@ fn run_node(code: &str) -> String {
         JsExecOptions {
             cache: true,
             module: false,
-            args: vec![],
+            args: Default::default(),
         },
     )
     .expect("failed to execute node.js")

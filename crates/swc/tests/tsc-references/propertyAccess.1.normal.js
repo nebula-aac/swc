@@ -1,7 +1,7 @@
 //// [propertyAccess.ts]
+import { _ as _call_super } from "@swc/helpers/_/_call_super";
 import { _ as _class_call_check } from "@swc/helpers/_/_class_call_check";
 import { _ as _inherits } from "@swc/helpers/_/_inherits";
-import { _ as _create_super } from "@swc/helpers/_/_create_super";
 var A = function A() {
     "use strict";
     _class_call_check(this, A);
@@ -9,20 +9,19 @@ var A = function A() {
 var B = /*#__PURE__*/ function(A) {
     "use strict";
     _inherits(B, A);
-    var _super = _create_super(B);
     function B() {
         _class_call_check(this, B);
-        return _super.apply(this, arguments);
+        return _call_super(this, B, arguments);
     }
     return B;
 }(A);
-var Compass;
-(function(Compass) {
+var Compass = /*#__PURE__*/ function(Compass) {
     Compass[Compass["North"] = 0] = "North";
     Compass[Compass["South"] = 1] = "South";
     Compass[Compass["East"] = 2] = "East";
     Compass[Compass["West"] = 3] = "West";
-})(Compass || (Compass = {}));
+    return Compass;
+}(Compass || {});
 var numIndex = {
     3: 'three',
     'three': 'three'

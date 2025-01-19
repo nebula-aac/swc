@@ -5,7 +5,7 @@ use std::{
 
 use is_macro::Is;
 use string_enum::StringEnum;
-use swc_atoms::{Atom, JsWord};
+use swc_atoms::Atom;
 use swc_common::{ast_node, util::take::Take, EqIgnoreSpan, Span};
 
 use crate::Function;
@@ -15,7 +15,7 @@ use crate::Function;
 pub struct Ident {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -49,7 +49,7 @@ impl Take for Ident {
 pub struct CustomIdent {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -65,7 +65,7 @@ impl EqIgnoreSpan for CustomIdent {
 pub struct DashedIdent {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -88,7 +88,7 @@ impl PartialEq<str> for DashedIdent {
 pub struct CustomPropertyName {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -104,7 +104,7 @@ impl EqIgnoreSpan for CustomPropertyName {
 pub struct Str {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -121,14 +121,11 @@ impl EqIgnoreSpan for Str {
 )]
 #[cfg_attr(
     feature = "rkyv",
-    archive(bound(
-        serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + \
-                     rkyv::ser::SharedSerializeRegistry",
-        deserialize = "__D: rkyv::de::SharedDeserializeRegistry"
-    ))
+    rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source))
 )]
-#[cfg_attr(feature = "rkyv", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv", archive_attr(repr(u32)))]
+#[cfg_attr(feature = "rkyv", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv", repr(u32))]
 pub enum DelimiterValue {
     /// `,`
     Comma,
@@ -176,7 +173,7 @@ pub struct HexColor {
     /// Includes `#`
     pub span: Span,
     /// Does **not** include `#`
-    pub value: JsWord,
+    pub value: Atom,
     /// Does **not** include `#`
     pub raw: Option<Atom>,
 }
@@ -401,14 +398,11 @@ pub struct Ratio {
 )]
 #[cfg_attr(
     feature = "rkyv",
-    archive(bound(
-        serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + \
-                     rkyv::ser::SharedSerializeRegistry",
-        deserialize = "__D: rkyv::de::SharedDeserializeRegistry"
-    ))
+    rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source))
 )]
-#[cfg_attr(feature = "rkyv", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv", archive_attr(repr(u32)))]
+#[cfg_attr(feature = "rkyv", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv", repr(u32))]
 pub enum BinOp {
     /// `+`
     Add,
@@ -443,7 +437,7 @@ pub enum UrlValue {
 pub struct UrlValueRaw {
     pub span: Span,
 
-    pub value: JsWord,
+    pub value: Atom,
     pub raw: Option<Atom>,
 }
 
@@ -461,9 +455,9 @@ pub enum UrlModifier {
 pub struct UnicodeRange {
     pub span: Span,
 
-    pub start: JsWord,
+    pub start: Atom,
 
-    pub end: Option<JsWord>,
+    pub end: Option<Atom>,
     pub raw: Option<Atom>,
 }
 
@@ -511,14 +505,11 @@ pub struct CalcOperator {
 )]
 #[cfg_attr(
     feature = "rkyv",
-    archive(bound(
-        serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + \
-                     rkyv::ser::SharedSerializeRegistry",
-        deserialize = "__D: rkyv::de::SharedDeserializeRegistry"
-    ))
+    rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source))
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(u32)))]
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", repr(u32))]
 pub enum CalcOperatorType {
     /// `+`
     Add,

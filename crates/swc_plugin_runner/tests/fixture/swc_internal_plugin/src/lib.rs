@@ -25,11 +25,12 @@ impl VisitMut for ConsoleOutputReplacer {
                         self.metadata.source_map.lookup_char_pos(ident.span.lo)
                     );
                     if ident.sym == *"console" {
-                        call.args[0].expr = Box::new(Expr::Lit(Lit::Str(Str {
+                        call.args[0].expr = Lit::Str(Str {
                             span: DUMMY_SP,
                             value: JsWord::from("changed_via_plugin"),
                             raw: Some(Atom::from("\"changed_via_plugin\"")),
-                        })));
+                        })
+                        .into();
                     }
                 }
             }
@@ -58,7 +59,7 @@ impl VisitMut for ConsoleOutputReplacer {
 /// important steps manually need to be performed like sending transformed
 /// results back to host. Refer swc_plugin_macro how does it work internally.
 #[plugin_transform]
-pub fn process(program: Program, metadata: TransformPluginProgramMetadata) -> Program {
+pub fn process(mut program: Program, metadata: TransformPluginProgramMetadata) -> Program {
     dbg!();
     HANDLER.with(|handler| {
         handler
@@ -69,7 +70,7 @@ pub fn process(program: Program, metadata: TransformPluginProgramMetadata) -> Pr
 
     let _stmt = quote!(
         "const $name = 4;" as Stmt,
-        name = Ident::new("ref".into(), DUMMY_SP)
+        name = Ident::new_no_ctxt("ref".into(), DUMMY_SP)
     );
 
     dbg!();
@@ -133,5 +134,6 @@ pub fn process(program: Program, metadata: TransformPluginProgramMetadata) -> Pr
 
     dbg!();
 
-    program.fold_with(&mut as_folder(ConsoleOutputReplacer { metadata }))
+    program.visit_mut_with(&mut ConsoleOutputReplacer { metadata });
+    program
 }

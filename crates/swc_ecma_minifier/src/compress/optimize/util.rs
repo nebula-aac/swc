@@ -5,7 +5,7 @@ use std::{
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use swc_atoms::JsWord;
-use swc_common::{collections::AHashSet, util::take::Take, Mark, Span, DUMMY_SP};
+use swc_common::{collections::AHashSet, util::take::Take, Mark, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_base::perf::{Parallel, ParallelExt};
 use swc_ecma_utils::{collect_decls, ExprCtx, ExprExt, Remapper};
@@ -30,7 +30,7 @@ impl<'b> Optimizer<'b> {
                 }
 
                 if seq.exprs.iter().any(|v| v.is_seq()) {
-                    let mut new = vec![];
+                    let mut new = Vec::new();
 
                     for e in seq.exprs.take() {
                         match *e {
@@ -68,13 +68,13 @@ impl<'b> Optimizer<'b> {
     }
 
     /// Check for `/** @const */`.
-    pub(super) fn has_const_ann(&self, span: Span) -> bool {
-        span.has_mark(self.marks.const_ann)
+    pub(super) fn has_const_ann(&self, ctxt: SyntaxContext) -> bool {
+        ctxt.has_mark(self.marks.const_ann)
     }
 
     /// Check for `/*#__NOINLINE__*/`
-    pub(super) fn has_noinline(&self, span: Span) -> bool {
-        span.has_mark(self.marks.noinline)
+    pub(super) fn has_noinline(&self, ctxt: SyntaxContext) -> bool {
+        ctxt.has_mark(self.marks.noinline)
     }
 
     /// RAII guard to change context temporarically
@@ -95,8 +95,7 @@ impl<'b> Optimizer<'b> {
             }
         }
 
-        let orig_ctx = self.ctx;
-        self.ctx = ctx;
+        let orig_ctx = std::mem::replace(&mut self.ctx, ctx);
         WithCtx {
             reducer: self,
             orig_ctx,
@@ -158,7 +157,7 @@ impl DerefMut for WithCtx<'_, '_> {
 
 impl Drop for WithCtx<'_, '_> {
     fn drop(&mut self) {
-        self.reducer.ctx = self.orig_ctx;
+        self.reducer.ctx = self.orig_ctx.clone();
     }
 }
 
@@ -241,7 +240,7 @@ impl Parallel for Finalizer<'_> {
     }
 }
 
-impl<'a> Finalizer<'a> {
+impl Finalizer<'_> {
     fn var(&mut self, i: &Id, mode: FinalizerMode) -> Option<Box<Expr>> {
         let mut e = match mode {
             FinalizerMode::Callee => {
@@ -276,12 +275,13 @@ impl<'a> Finalizer<'a> {
         e.visit_mut_children_with(self);
 
         match &*e {
-            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => {
-                Some(Box::new(Expr::Seq(SeqExpr {
+            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => Some(
+                SeqExpr {
                     span: DUMMY_SP,
                     exprs: vec![0.into(), e],
-                })))
-            }
+                }
+                .into(),
+            ),
             _ => Some(e),
         }
     }
@@ -308,24 +308,6 @@ enum FinalizerMode {
 impl VisitMut for Finalizer<'_> {
     noop_visit_mut_type!();
 
-    fn visit_mut_callee(&mut self, e: &mut Callee) {
-        e.visit_mut_children_with(self);
-
-        if let Callee::Expr(e) = e {
-            self.check(e, FinalizerMode::Callee);
-        }
-    }
-
-    fn visit_mut_member_expr(&mut self, e: &mut MemberExpr) {
-        e.visit_mut_children_with(self);
-
-        if let MemberProp::Computed(ref mut prop) = e.prop {
-            if let Expr::Lit(Lit::Num(..)) = &*prop.expr {
-                self.check(&mut e.obj, FinalizerMode::MemberAccess);
-            }
-        }
-    }
-
     fn visit_mut_bin_expr(&mut self, e: &mut BinExpr) {
         e.visit_mut_children_with(self);
 
@@ -342,65 +324,17 @@ impl VisitMut for Finalizer<'_> {
         }
     }
 
-    fn visit_mut_var_declarators(&mut self, n: &mut Vec<VarDeclarator>) {
-        n.visit_mut_children_with(self);
+    fn visit_mut_callee(&mut self, e: &mut Callee) {
+        e.visit_mut_children_with(self);
 
-        n.retain(|v| !v.name.is_invalid());
-    }
-
-    fn visit_mut_var_declarator(&mut self, n: &mut VarDeclarator) {
-        n.visit_mut_children_with(self);
-
-        if n.init.is_none() {
-            if let Pat::Ident(i) = &n.name {
-                if self.vars_to_remove.contains(&i.to_id()) {
-                    n.name.take();
-                }
-            }
+        if let Callee::Expr(e) = e {
+            self.check(e, FinalizerMode::Callee);
         }
     }
 
-    fn visit_mut_opt_var_decl_or_expr(&mut self, n: &mut Option<VarDeclOrExpr>) {
-        n.visit_mut_children_with(self);
-
-        if let Some(VarDeclOrExpr::VarDecl(v)) = n {
-            if v.decls.is_empty() {
-                *n = None;
-            }
-        }
-    }
-
-    fn visit_mut_stmt(&mut self, n: &mut Stmt) {
-        n.visit_mut_children_with(self);
-
-        if let Stmt::Decl(Decl::Var(v)) = n {
-            if v.decls.is_empty() {
-                n.take();
-            }
-        }
-    }
-
-    fn visit_mut_prop_or_spreads(&mut self, n: &mut Vec<PropOrSpread>) {
-        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
-            n.visit_mut_with(v);
-        });
-    }
-
-    fn visit_mut_expr_or_spreads(&mut self, n: &mut Vec<ExprOrSpread>) {
-        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
-            n.visit_mut_with(v);
-        });
-    }
-
-    fn visit_mut_opt_vec_expr_or_spreads(&mut self, n: &mut Vec<Option<ExprOrSpread>>) {
-        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
-            n.visit_mut_with(v);
-        });
-    }
-
-    fn visit_mut_exprs(&mut self, n: &mut Vec<Box<Expr>>) {
-        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
-            n.visit_mut_with(v);
+    fn visit_mut_class_members(&mut self, members: &mut Vec<ClassMember>) {
+        self.maybe_par(*HEAVY_TASK_PARALLELS, members, |v, member| {
+            member.visit_mut_with(v);
         });
     }
 
@@ -436,16 +370,88 @@ impl VisitMut for Finalizer<'_> {
         n.visit_mut_children_with(self);
     }
 
-    fn visit_mut_stmts(&mut self, n: &mut Vec<Stmt>) {
+    fn visit_mut_expr_or_spreads(&mut self, n: &mut Vec<ExprOrSpread>) {
         self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
             n.visit_mut_with(v);
         });
+    }
+
+    fn visit_mut_exprs(&mut self, n: &mut Vec<Box<Expr>>) {
+        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
+            n.visit_mut_with(v);
+        });
+    }
+
+    fn visit_mut_member_expr(&mut self, e: &mut MemberExpr) {
+        e.visit_mut_children_with(self);
+
+        if let MemberProp::Computed(ref mut prop) = e.prop {
+            if let Expr::Lit(Lit::Num(..)) = &*prop.expr {
+                self.check(&mut e.obj, FinalizerMode::MemberAccess);
+            }
+        }
     }
 
     fn visit_mut_module_items(&mut self, n: &mut Vec<ModuleItem>) {
         self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
             n.visit_mut_with(v);
         });
+    }
+
+    fn visit_mut_opt_var_decl_or_expr(&mut self, n: &mut Option<VarDeclOrExpr>) {
+        n.visit_mut_children_with(self);
+
+        if let Some(VarDeclOrExpr::VarDecl(v)) = n {
+            if v.decls.is_empty() {
+                *n = None;
+            }
+        }
+    }
+
+    fn visit_mut_opt_vec_expr_or_spreads(&mut self, n: &mut Vec<Option<ExprOrSpread>>) {
+        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
+            n.visit_mut_with(v);
+        });
+    }
+
+    fn visit_mut_prop_or_spreads(&mut self, n: &mut Vec<PropOrSpread>) {
+        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
+            n.visit_mut_with(v);
+        });
+    }
+
+    fn visit_mut_stmt(&mut self, n: &mut Stmt) {
+        n.visit_mut_children_with(self);
+
+        if let Stmt::Decl(Decl::Var(v)) = n {
+            if v.decls.is_empty() {
+                n.take();
+            }
+        }
+    }
+
+    fn visit_mut_stmts(&mut self, n: &mut Vec<Stmt>) {
+        self.maybe_par(*HEAVY_TASK_PARALLELS, n, |v, n| {
+            n.visit_mut_with(v);
+        });
+    }
+
+    fn visit_mut_var_declarator(&mut self, n: &mut VarDeclarator) {
+        n.visit_mut_children_with(self);
+
+        if n.init.is_none() {
+            if let Pat::Ident(i) = &n.name {
+                if self.vars_to_remove.contains(&i.to_id()) {
+                    n.name.take();
+                }
+            }
+        }
+    }
+
+    fn visit_mut_var_declarators(&mut self, n: &mut Vec<VarDeclarator>) {
+        n.visit_mut_children_with(self);
+
+        n.retain(|v| !v.name.is_invalid());
     }
 }
 
@@ -469,12 +475,13 @@ impl<'a> NormalMultiReplacer<'a> {
         e.visit_mut_children_with(self);
 
         match &*e {
-            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => {
-                Some(Box::new(Expr::Seq(SeqExpr {
+            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => Some(
+                SeqExpr {
                     span: DUMMY_SP,
                     exprs: vec![0.into(), e],
-                })))
-            }
+                }
+                .into(),
+            ),
             _ => Some(e),
         }
     }
@@ -525,14 +532,19 @@ impl VisitMut for NormalMultiReplacer<'_> {
                 self.changed = true;
 
                 *p = Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(Ident::new(
-                        i.sym.clone(),
-                        i.span.with_ctxt(Default::default()),
-                    )),
+                    key: PropName::Ident(IdentName::new(i.sym.clone(), i.span)),
                     value,
                 });
             }
         }
+    }
+
+    fn visit_mut_stmt(&mut self, node: &mut Stmt) {
+        if self.vars.is_empty() {
+            return;
+        }
+
+        node.visit_mut_children_with(self);
     }
 }
 
@@ -556,12 +568,13 @@ impl ExprReplacer {
         let e = self.to.take()?;
 
         match &*e {
-            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => {
-                Some(Box::new(Expr::Seq(SeqExpr {
+            Expr::Ident(Ident { sym, .. }) if &**sym == "eval" => Some(
+                SeqExpr {
                     span: DUMMY_SP,
                     exprs: vec![0.into(), e],
-                })))
-            }
+                }
+                .into(),
+            ),
             _ => Some(e),
         }
     }
@@ -574,7 +587,7 @@ impl VisitMut for ExprReplacer {
         e.visit_mut_children_with(self);
 
         if let Expr::Ident(i) = e {
-            if self.from.0 == i.sym && self.from.1 == i.span.ctxt {
+            if self.from.0 == i.sym && self.from.1 == i.ctxt {
                 if let Some(new) = self.take() {
                     *e = *new;
                 } else {
@@ -588,14 +601,14 @@ impl VisitMut for ExprReplacer {
         p.visit_mut_children_with(self);
 
         if let Prop::Shorthand(i) = p {
-            if self.from.0 == i.sym && self.from.1 == i.span.ctxt {
+            if self.from.0 == i.sym && self.from.1 == i.ctxt {
                 let value = if let Some(new) = self.take() {
                     new
                 } else {
                     unreachable!("`{}` is already taken", i)
                 };
                 *p = Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(i.clone()),
+                    key: PropName::Ident(i.clone().into()),
                     value,
                 });
             }

@@ -620,8 +620,9 @@ where
                         None => true,
                         _ => false,
                     },
-                    // 	The closing tag can be omitted if it is immediately followed by a <rb>, <rtc>
-                    // or <rt> element opening tag or by its parent closing tag.
+                    // 	The closing tag can be omitted if it is immediately followed by a <rb>,
+                    // <rtc> or <rt> element opening tag or by its parent
+                    // closing tag.
                     "rtc" => match next {
                         Some(Child::Element(Element {
                             namespace,
@@ -976,9 +977,9 @@ fn minify_attribute_value(value: &str, quotes: bool) -> (Cow<'_, str>, Option<ch
     }
 
     if dq > sq {
-        return (Cow::Owned(minified.replace('\'', "&apos;")), Some('\''));
+        (Cow::Owned(minified.replace('\'', "&apos;")), Some('\''))
     } else {
-        return (Cow::Owned(minified.replace('"', "&quot;")), Some('"'));
+        (Cow::Owned(minified.replace('"', "&quot;")), Some('"'))
     }
 }
 

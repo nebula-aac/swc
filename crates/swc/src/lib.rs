@@ -113,7 +113,9 @@ pub extern crate swc_atoms as atoms;
 extern crate swc_common as common;
 
 use std::{
+    cell::RefCell,
     fs::{read_to_string, File},
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -129,24 +131,23 @@ use once_cell::sync::Lazy;
 use serde_json::error::Category;
 pub use sourcemap;
 use swc_common::{
-    chain, comments::Comments, errors::Handler, sync::Lrc, FileName, Mark, SourceFile, SourceMap,
-    Spanned, GLOBALS,
+    comments::Comments, errors::Handler, sync::Lrc, FileName, Mark, SourceFile, SourceMap, Spanned,
+    GLOBALS,
 };
 pub use swc_compiler_base::{PrintArgs, TransformOutput};
 pub use swc_config::config_types::{BoolConfig, BoolOr, BoolOrDataConfig};
-use swc_ecma_ast::{EsVersion, Program};
-use swc_ecma_codegen::Node;
+use swc_ecma_ast::{noop_pass, EsVersion, Pass, Program};
+use swc_ecma_codegen::{to_code_with_comments, Node};
 use swc_ecma_loader::resolvers::{
     lru::CachingResolver, node::NodeModulesResolver, tsc::TsConfigResolver,
 };
-use swc_ecma_minifier::option::{MinifyOptions, TopLevelOptions};
-use swc_ecma_parser::{EsConfig, Syntax};
+use swc_ecma_minifier::option::{MangleCache, MinifyOptions, TopLevelOptions};
+use swc_ecma_parser::{EsSyntax, Syntax};
 use swc_ecma_transforms::{
     fixer,
     helpers::{self, Helpers},
     hygiene,
-    modules::path::NodeImportResolver,
-    pass::noop,
+    modules::{path::NodeImportResolver, rewriter::import_rewriter},
     resolver,
 };
 use swc_ecma_transforms_base::fixer::paren_remover;
@@ -154,6 +155,9 @@ use swc_ecma_visit::{FoldWith, VisitMutWith, VisitWith};
 pub use swc_error_reporters::handler::{try_with_handler, HandlerOpts};
 pub use swc_node_comments::SwcComments;
 use swc_timer::timer;
+use swc_transform_common::output::emit;
+use swc_typescript::fast_dts::FastDts;
+use tracing::warn;
 use url::Url;
 
 pub use crate::builder::PassBuilder;
@@ -252,43 +256,32 @@ impl Compiler {
             let name = &fm.name;
 
             let read_inline_sourcemap =
-                |data_url: Option<&str>| -> Result<Option<sourcemap::SourceMap>, Error> {
-                    match data_url {
-                        Some(data_url) => {
-                            let url = Url::parse(data_url).with_context(|| {
-                                format!("failed to parse inline source map url\n{}", data_url)
-                            })?;
+                |data_url: &str| -> Result<Option<sourcemap::SourceMap>, Error> {
+                    let url = Url::parse(data_url).with_context(|| {
+                        format!("failed to parse inline source map url\n{}", data_url)
+                    })?;
 
-                            let idx = match url.path().find("base64,") {
-                                Some(v) => v,
-                                None => {
-                                    bail!(
-                                        "failed to parse inline source map: not base64: {:?}",
-                                        url
-                                    )
-                                }
-                            };
-
-                            let content = url.path()[idx + "base64,".len()..].trim();
-
-                            let res = BASE64_STANDARD
-                                .decode(content.as_bytes())
-                                .context("failed to decode base64-encoded source map")?;
-
-                            Ok(Some(sourcemap::SourceMap::from_slice(&res).context(
-                                "failed to read input source map from inlined base64 encoded \
-                                 string",
-                            )?))
-                        }
+                    let idx = match url.path().find("base64,") {
+                        Some(v) => v,
                         None => {
-                            bail!("failed to parse inline source map: `sourceMappingURL` not found")
+                            bail!("failed to parse inline source map: not base64: {:?}", url)
                         }
-                    }
+                    };
+
+                    let content = url.path()[idx + "base64,".len()..].trim();
+
+                    let res = BASE64_STANDARD
+                        .decode(content.as_bytes())
+                        .context("failed to decode base64-encoded source map")?;
+
+                    Ok(Some(sourcemap::SourceMap::from_slice(&res).context(
+                        "failed to read input source map from inlined base64 encoded string",
+                    )?))
                 };
 
             let read_file_sourcemap =
                 |data_url: Option<&str>| -> Result<Option<sourcemap::SourceMap>, Error> {
-                    match &name {
+                    match &**name {
                         FileName::Real(filename) => {
                             let dir = match filename.parent() {
                                 Some(v) => v,
@@ -308,14 +301,17 @@ impl Compiler {
                                         // code.
                                         // Map files are for internal troubleshooting
                                         // convenience.
-                                        map_path =
+                                        let fallback_map_path =
                                             PathBuf::from(format!("{}.map", filename.display()));
-                                        if !map_path.exists() {
+                                        if fallback_map_path.exists() {
+                                            map_path = fallback_map_path;
+                                        } else {
                                             bail!(
                                                 "failed to find input source map file {:?} in \
-                                                 {:?} file",
+                                                 {:?} file as either {:?} or with appended .map",
+                                                data_url,
+                                                filename.display(),
                                                 map_path.display(),
-                                                filename.display()
                                             )
                                         }
                                     }
@@ -338,6 +334,23 @@ impl Compiler {
                                 Some(map_path) => {
                                     let path = map_path.display().to_string();
                                     let file = File::open(&path);
+
+                                    // If file is not found, we should return None.
+                                    // Some libraries generates source map but omit them from the
+                                    // npm package.
+                                    //
+                                    // See https://github.com/swc-project/swc/issues/8789#issuecomment-2105055772
+                                    if file
+                                        .as_ref()
+                                        .is_err_and(|err| err.kind() == ErrorKind::NotFound)
+                                    {
+                                        warn!(
+                                            "source map is specified by sourceMappingURL but \
+                                             there's no source map at `{}`",
+                                            path
+                                        );
+                                        return Ok(None);
+                                    }
 
                                     // Old behavior.
                                     let file = if !is_default {
@@ -376,17 +389,16 @@ impl Compiler {
                     Some(url.trim())
                 });
 
-                match read_inline_sourcemap(text) {
+                // Load original source map if possible
+                let result = match text {
+                    Some(text) if text.starts_with("data:") => read_inline_sourcemap(text),
+                    _ => read_file_sourcemap(text),
+                };
+                match result {
                     Ok(r) => r,
                     Err(err) => {
-                        // Load original source map if possible
-                        match read_file_sourcemap(text) {
-                            Ok(v) => v,
-                            Err(_) => {
-                                tracing::error!("failed to read input source map: {:?}", err);
-                                None
-                            }
-                        }
+                        tracing::error!("failed to read input source map: {:?}", err);
+                        None
                     }
                 }
             };
@@ -577,9 +589,9 @@ impl Compiler {
         name: &FileName,
         comments: Option<&'a SingleThreadedComments>,
         before_pass: impl 'a + FnOnce(&Program) -> P,
-    ) -> Result<Option<BuiltInput<impl 'a + swc_ecma_visit::Fold>>, Error>
+    ) -> Result<Option<BuiltInput<impl 'a + Pass>>, Error>
     where
-        P: 'a + swc_ecma_visit::Fold,
+        P: 'a + Pass,
     {
         self.run(move || {
             let _timer = timer!("Compiler.parse");
@@ -671,8 +683,8 @@ impl Compiler {
         custom_after_pass: impl FnOnce(&Program) -> P2,
     ) -> Result<TransformOutput, Error>
     where
-        P1: swc_ecma_visit::Fold,
-        P2: swc_ecma_visit::Fold,
+        P1: Pass,
+        P2: Pass,
     {
         self.run(|| -> Result<_, Error> {
             let config = self.run(|| {
@@ -695,7 +707,7 @@ impl Compiler {
 
             let after_pass = custom_after_pass(&config.program);
 
-            let config = config.with_pass(|pass| chain!(pass, after_pass));
+            let config = config.with_pass(|pass| (pass, after_pass));
 
             let orig = if config.source_maps.enabled() {
                 self.get_orig_src_map(
@@ -712,7 +724,7 @@ impl Compiler {
                 None
             };
 
-            self.apply_transforms(handler, orig.as_ref(), config)
+            self.apply_transforms(handler, comments.clone(), fm.clone(), orig.as_ref(), config)
         })
     }
 
@@ -729,8 +741,8 @@ impl Compiler {
             handler,
             opts,
             SingleThreadedComments::default(),
-            |_| noop(),
-            |_| noop(),
+            |_| noop_pass(),
+            |_| noop_pass(),
         )
     }
 
@@ -740,6 +752,7 @@ impl Compiler {
         fm: Arc<SourceFile>,
         handler: &Handler,
         opts: &JsMinifyOptions,
+        extras: JsMinifyExtras,
     ) -> Result<TransformOutput, Error> {
         self.run(|| {
             let _timer = timer!("Compiler::minify");
@@ -785,7 +798,35 @@ impl Compiler {
 
             // https://github.com/swc-project/swc/issues/2254
 
-            if opts.module {
+            if opts.keep_fnames {
+                if let Some(opts) = &mut min_opts.compress {
+                    opts.keep_fnames = true;
+                }
+                if let Some(opts) = &mut min_opts.mangle {
+                    opts.keep_fn_names = true;
+                }
+            }
+
+            let comments = SingleThreadedComments::default();
+
+            let mut program = self
+                .parse_js(
+                    fm.clone(),
+                    handler,
+                    target,
+                    Syntax::Es(EsSyntax {
+                        jsx: true,
+                        decorators: true,
+                        decorators_before_export: true,
+                        import_attributes: true,
+                        ..Default::default()
+                    }),
+                    opts.module,
+                    Some(&comments),
+                )
+                .context("failed to parse input file")?;
+
+            if program.is_module() {
                 if let Some(opts) = &mut min_opts.compress {
                     if opts.top_level.is_none() {
                         opts.top_level = Some(TopLevelOptions { functions: true });
@@ -799,40 +840,12 @@ impl Compiler {
                 }
             }
 
-            if opts.keep_fnames {
-                if let Some(opts) = &mut min_opts.compress {
-                    opts.keep_fnames = true;
-                }
-                if let Some(opts) = &mut min_opts.mangle {
-                    opts.keep_fn_names = true;
-                }
-            }
-
-            let comments = SingleThreadedComments::default();
-
-            let module = self
-                .parse_js(
-                    fm.clone(),
-                    handler,
-                    target,
-                    Syntax::Es(EsConfig {
-                        jsx: true,
-                        decorators: true,
-                        decorators_before_export: true,
-                        import_attributes: true,
-                        ..Default::default()
-                    }),
-                    IsModule::Bool(opts.module),
-                    Some(&comments),
-                )
-                .context("failed to parse input file")?;
-
             let source_map_names = if source_map.enabled() {
                 let mut v = swc_compiler_base::IdentCollector {
                     names: Default::default(),
                 };
 
-                module.visit_with(&mut v);
+                program.visit_with(&mut v);
 
                 v.names
             } else {
@@ -844,14 +857,13 @@ impl Compiler {
 
             let is_mangler_enabled = min_opts.mangle.is_some();
 
-            let module = self.run_transform(handler, false, || {
-                let module = module.fold_with(&mut paren_remover(Some(&comments)));
+            program = self.run_transform(handler, false, || {
+                program.mutate(&mut paren_remover(Some(&comments)));
 
-                let module =
-                    module.fold_with(&mut resolver(unresolved_mark, top_level_mark, false));
+                program.mutate(&mut resolver(unresolved_mark, top_level_mark, false));
 
-                let mut module = swc_ecma_minifier::optimize(
-                    module,
+                let mut program = swc_ecma_minifier::optimize(
+                    program,
                     self.cm.clone(),
                     Some(&comments),
                     None,
@@ -859,13 +871,15 @@ impl Compiler {
                     &swc_ecma_minifier::option::ExtraOptions {
                         unresolved_mark,
                         top_level_mark,
+                        mangle_name_cache: extras.mangle_name_cache,
                     },
                 );
 
                 if !is_mangler_enabled {
-                    module.visit_mut_with(&mut hygiene())
+                    program.visit_mut_with(&mut hygiene())
                 }
-                module.fold_with(&mut fixer(Some(&comments as &dyn Comments)))
+                program.mutate(&mut fixer(Some(&comments as &dyn Comments)));
+                program
             });
 
             let preserve_comments = opts
@@ -874,10 +888,14 @@ impl Compiler {
                 .clone()
                 .into_inner()
                 .unwrap_or(BoolOr::Data(JsMinifyCommentOption::PreserveSomeComments));
-            swc_compiler_base::minify_file_comments(&comments, preserve_comments);
+            swc_compiler_base::minify_file_comments(
+                &comments,
+                preserve_comments,
+                opts.format.preserve_annotations,
+            );
 
             self.print(
-                &module,
+                &program,
                 PrintArgs {
                     source_root: None,
                     source_file_name: Some(&fm.name.to_string()),
@@ -895,7 +913,9 @@ impl Compiler {
                         .with_ascii_only(opts.format.ascii_only)
                         .with_emit_assert_for_import_attributes(
                             opts.format.emit_assert_for_import_attributes,
-                        ),
+                        )
+                        .with_inline_script(opts.format.inline_script),
+                    output: None,
                 },
             )
         })
@@ -920,8 +940,8 @@ impl Compiler {
             handler,
             opts,
             SingleThreadedComments::default(),
-            |_| noop(),
-            |_| noop(),
+            |_| noop_pass(),
+            |_| noop_pass(),
         )
     }
 
@@ -929,11 +949,21 @@ impl Compiler {
     fn apply_transforms(
         &self,
         handler: &Handler,
+        comments: SingleThreadedComments,
+        fm: Arc<SourceFile>,
         orig: Option<&sourcemap::SourceMap>,
-        config: BuiltInput<impl swc_ecma_visit::Fold>,
+        config: BuiltInput<impl Pass>,
     ) -> Result<TransformOutput, Error> {
         self.run(|| {
             let program = config.program;
+
+            if config.emit_isolated_dts && !config.syntax.typescript() {
+                handler.warn(
+                    "jsc.experimental.emitIsolatedDts is enabled but the syntax is not TypeScript",
+                );
+            }
+
+            let emit_dts = config.syntax.typescript() && config.emit_isolated_dts;
             let source_map_names = if config.source_maps.enabled() {
                 let mut v = swc_compiler_base::IdentCollector {
                     names: Default::default(),
@@ -946,16 +976,57 @@ impl Compiler {
                 Default::default()
             };
 
-            let mut pass = config.pass;
-            let program = helpers::HELPERS.set(&Helpers::new(config.external_helpers), || {
-                HANDLER.set(handler, || {
-                    // Fold module
-                    program.fold_with(&mut pass)
+            let dts_code = if emit_dts {
+                let (leading, trailing) = comments.borrow_all();
+
+                let leading = std::rc::Rc::new(RefCell::new(leading.clone()));
+                let trailing = std::rc::Rc::new(RefCell::new(trailing.clone()));
+
+                let comments = SingleThreadedComments::from_leading_and_trailing(leading, trailing);
+                let mut checker = FastDts::new(fm.name.clone(), Default::default());
+                let mut program = program.clone();
+
+                if let Some((base, resolver)) = config.resolver {
+                    program.mutate(import_rewriter(base, resolver));
+                }
+
+                let issues = checker.transform(&mut program);
+
+                for issue in issues {
+                    handler
+                        .struct_span_err(issue.range.span, &issue.message)
+                        .emit();
+                }
+
+                let dts_code = to_code_with_comments(Some(&comments), &program);
+                Some(dts_code)
+            } else {
+                None
+            };
+
+            let pass = config.pass;
+            let (program, output) = swc_transform_common::output::capture(|| {
+                if let Some(dts_code) = dts_code {
+                    emit(
+                        "__swc_isolated_declarations__".into(),
+                        serde_json::Value::String(dts_code),
+                    );
+                }
+
+                helpers::HELPERS.set(&Helpers::new(config.external_helpers), || {
+                    HANDLER.set(handler, || {
+                        // Fold module
+                        program.apply(pass)
+                    })
                 })
             });
 
             if let Some(comments) = &config.comments {
-                swc_compiler_base::minify_file_comments(comments, config.preserve_comments);
+                swc_compiler_base::minify_file_comments(
+                    comments,
+                    config.preserve_comments,
+                    config.output.preserve_annotations.into_bool(),
+                );
             }
 
             self.print(
@@ -983,10 +1054,32 @@ impl Compiler {
                         )
                         .with_emit_assert_for_import_attributes(
                             config.emit_assert_for_import_attributes,
-                        ),
+                        )
+                        .with_inline_script(config.codegen_inline_script),
+                    output: if output.is_empty() {
+                        None
+                    } else {
+                        Some(output)
+                    },
                 },
             )
         })
+    }
+}
+
+#[non_exhaustive]
+#[derive(Clone, Default)]
+pub struct JsMinifyExtras {
+    pub mangle_name_cache: Option<Arc<dyn MangleCache>>,
+}
+
+impl JsMinifyExtras {
+    pub fn with_mangle_name_cache(
+        mut self,
+        mangle_name_cache: Option<Arc<dyn MangleCache>>,
+    ) -> Self {
+        self.mangle_name_cache = mangle_name_cache;
+        self
     }
 }
 

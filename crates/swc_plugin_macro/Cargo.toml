@@ -3,10 +3,10 @@ authors       = ["강동윤 <kdy1997.dev@gmail.com>", "OJ Kwon <kwon.ohjoong@gma
 description   = "Macro support for authoring plugin's transform fn"
 documentation = "https://rustdoc.swc.rs/swc_plugin_macro/"
 edition       = "2018"
-license       = "Apache-2.0"
+license       = { workspace = true }
 name          = "swc_plugin_macro"
-repository    = "https://github.com/swc-project/swc.git"
-version       = "0.9.16"
+repository    = { workspace = true }
+version       = "1.0.0"
 
 [lib]
 bench      = false

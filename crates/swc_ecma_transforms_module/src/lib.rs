@@ -1,10 +1,11 @@
 #![deny(clippy::all)]
-#![deny(unused)]
 #![allow(clippy::needless_lifetimes)]
 #![allow(clippy::vec_box)]
 #![allow(clippy::mutable_key_type)]
 
 use serde::{Deserialize, Serialize};
+use swc_common::{Span, SyntaxContext};
+use util::Config;
 
 pub use self::{amd::amd, common_js::common_js, system_js::system_js, umd::umd};
 
@@ -24,6 +25,8 @@ pub mod umd;
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EsModuleConfig {
-    #[serde(default)]
-    pub resolve_fully: bool,
+    #[serde(flatten, default)]
+    pub config: Config,
 }
+
+type SpanCtx = (Span, SyntaxContext);

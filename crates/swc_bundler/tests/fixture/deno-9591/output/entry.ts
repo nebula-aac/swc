@@ -1621,15 +1621,15 @@ const mod3 = {
     normalizeGlob,
     joinGlobs
 };
-var LogLevels;
-(function(LogLevels) {
+var LogLevels = /*#__PURE__*/ function(LogLevels) {
     LogLevels[LogLevels["NOTSET"] = 0] = "NOTSET";
     LogLevels[LogLevels["DEBUG"] = 10] = "DEBUG";
     LogLevels[LogLevels["INFO"] = 20] = "INFO";
     LogLevels[LogLevels["WARNING"] = 30] = "WARNING";
     LogLevels[LogLevels["ERROR"] = 40] = "ERROR";
     LogLevels[LogLevels["CRITICAL"] = 50] = "CRITICAL";
-})(LogLevels || (LogLevels = {}));
+    return LogLevels;
+}({});
 Object.keys(LogLevels).filter((key)=>isNaN(Number(key)));
 const byLevel = {
     [String(0)]: "NOTSET",
@@ -1837,6 +1837,13 @@ function copyBytes(src, dst, off = 0) {
     return src.byteLength;
 }
 const DEFAULT_BUF_SIZE = 4096;
+class PartialReadError extends Deno.errors.UnexpectedEof {
+    name = "PartialReadError";
+    partial;
+    constructor(){
+        super("Encountered UnexpectedEof, data only partially read");
+    }
+}
 class AbstractBufBase {
     buf;
     usedBufferBytes = 0;
@@ -1857,8 +1864,7 @@ class BufWriterSync extends AbstractBufBase {
         return writer instanceof BufWriterSync ? writer : new BufWriterSync(writer, size);
     }
     constructor(writer, size = DEFAULT_BUF_SIZE){
-        super();
-        this.writer = writer;
+        super(), this.writer = writer;
         if (size <= 0) {
             size = DEFAULT_BUF_SIZE;
         }
@@ -2918,11 +2924,11 @@ function copySync(src, dest, options = {}) {
         copyFileSync(src, dest, options);
     }
 }
-var EOL;
-(function(EOL) {
+var EOL = /*#__PURE__*/ function(EOL) {
     EOL["LF"] = "\n";
     EOL["CRLF"] = "\r\n";
-})(EOL || (EOL = {}));
+    return EOL;
+}({});
 const regDetect = /(?:\r?\n)/g;
 function detect(content) {
     const d = content.match(regDetect);

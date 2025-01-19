@@ -1,16 +1,11 @@
-use std::{
-    io::{self, Write},
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
+use std::path::PathBuf;
 
 use swc_common::{FileName, Mark};
 use swc_ecma_ast::*;
-use swc_ecma_codegen::Emitter;
-use swc_ecma_parser::{lexer::Lexer, EsConfig, Parser, Syntax, TsConfig};
+use swc_ecma_codegen::to_code_default;
+use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, Syntax, TsSyntax};
 use swc_ecma_transforms_base::{fixer::fixer, hygiene::hygiene, resolver};
 use swc_ecma_transforms_typescript::typescript;
-use swc_ecma_visit::FoldWith;
 
 #[testing::fixture("../swc_ecma_parser/tests/tsc/**/*.ts")]
 #[testing::fixture("../swc_ecma_parser/tests/tsc/**/*.tsx")]
@@ -45,7 +40,6 @@ fn identity(entry: PathBuf) {
 
     // TODO: Unignore
     let postponed = &[
-        "constEnum4.ts",
         "decoratorOnClassMethod11.ts",
         "elementAccessChain.3.ts",
         "awaitUsingDeclarationsInForAwaitOf.ts",
@@ -87,7 +81,7 @@ fn identity(entry: PathBuf) {
         println!("{}", src.src);
 
         let mut parser: Parser<Lexer> = Parser::new(
-            Syntax::Typescript(TsConfig {
+            Syntax::Typescript(TsSyntax {
                 tsx: file_name.contains("tsx"),
                 decorators: true,
                 dts: false,
@@ -98,21 +92,7 @@ fn identity(entry: PathBuf) {
             None,
         );
 
-        let mut wr = Buf(Arc::new(RwLock::new(vec![])));
-
-        {
-            let mut emitter = Emitter {
-                cfg: swc_ecma_codegen::Config::default(),
-                cm: cm.clone(),
-                wr: Box::new(swc_ecma_codegen::text_writer::JsWriter::new(
-                    cm.clone(),
-                    "\n",
-                    &mut wr,
-                    None,
-                )),
-                comments: None,
-            };
-
+        let js_content = {
             // Parse source
             let program = parser
                 .parse_typescript_module()
@@ -120,16 +100,17 @@ fn identity(entry: PathBuf) {
                     let unresolved_mark = Mark::new();
                     let top_level_mark = Mark::new();
                     Program::Module(p)
-                        .fold_with(&mut resolver(unresolved_mark, top_level_mark, true))
-                        .fold_with(&mut typescript(
+                        .apply(resolver(unresolved_mark, top_level_mark, true))
+                        .apply(typescript(
                             typescript::Config {
                                 no_empty_export: true,
                                 ..Default::default()
                             },
+                            unresolved_mark,
                             top_level_mark,
                         ))
-                        .fold_with(&mut hygiene())
-                        .fold_with(&mut fixer(None))
+                        .apply(hygiene())
+                        .apply(fixer(None))
                 })
                 .map_err(|e| {
                     eprintln!("failed to parse as typescript module");
@@ -142,17 +123,15 @@ fn identity(entry: PathBuf) {
                 Err(_) => return Ok(()),
             };
 
-            emitter.emit_program(&program).unwrap();
-        }
-
-        let js_content = String::from_utf8_lossy(&wr.0.read().unwrap()).to_string();
+            to_code_default(cm.clone(), None, &program)
+        };
 
         println!("---------------- JS ----------------\n\n{}", js_content);
 
-        let js_fm = cm.new_source_file(FileName::Anon, js_content.clone());
+        let js_fm = cm.new_source_file(FileName::Anon.into(), js_content.clone());
 
         let mut parser: Parser<Lexer> = Parser::new(
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 jsx: file_name.contains("tsx"),
                 decorators: true,
                 decorators_before_export: true,
@@ -181,16 +160,4 @@ fn identity(entry: PathBuf) {
         Ok(())
     })
     .expect("failed to run test");
-}
-
-#[derive(Debug, Clone)]
-struct Buf(Arc<RwLock<Vec<u8>>>);
-impl Write for Buf {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.0.write().unwrap().write(data)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.write().unwrap().flush()
-    }
 }

@@ -24,7 +24,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::GLOBALS;
-use crate::collections::AHashMap;
+use crate::{collections::AHashMap, EqIgnoreSpan};
 
 /// A SyntaxContext represents a chain of macro expansions (represented by
 /// marks).
@@ -34,9 +34,9 @@ use crate::collections::AHashMap;
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(C)))]
-pub struct SyntaxContext(#[cfg_attr(feature = "__rkyv", omit_bounds)] u32);
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", repr(C))]
+pub struct SyntaxContext(#[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))] u32);
 
 #[cfg(feature = "arbitrary")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arbitrary")))]
@@ -46,15 +46,30 @@ impl<'a> arbitrary::Arbitrary<'a> for SyntaxContext {
     }
 }
 
+better_scoped_tls::scoped_tls!(static EQ_IGNORE_SPAN_IGNORE_CTXT: ());
+
+impl EqIgnoreSpan for SyntaxContext {
+    fn eq_ignore_span(&self, other: &Self) -> bool {
+        self == other || EQ_IGNORE_SPAN_IGNORE_CTXT.is_set()
+    }
+}
+
+impl SyntaxContext {
+    /// In `op`, [EqIgnoreSpan] of [Ident] will ignore the syntax context.
+    pub fn within_ignored_ctxt<F, Ret>(op: F) -> Ret
+    where
+        F: FnOnce() -> Ret,
+    {
+        EQ_IGNORE_SPAN_IGNORE_CTXT.set(&(), op)
+    }
+}
+
 #[allow(unused)]
 #[derive(Copy, Clone, Debug)]
 struct SyntaxContextData {
     outer_mark: Mark,
     prev_ctxt: SyntaxContext,
-    // This context, but with all transparent and semi-transparent marks filtered away.
     opaque: SyntaxContext,
-    // This context, but with all transparent marks filtered away.
-    opaque_and_semitransparent: SyntaxContext,
 }
 
 /// A mark is a unique id associated with a macro expansion.
@@ -65,15 +80,14 @@ pub struct Mark(u32);
 #[derive(Clone, Debug)]
 pub(crate) struct MarkData {
     pub(crate) parent: Mark,
-    pub(crate) is_builtin: bool,
 }
 
 #[cfg_attr(
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(C)))]
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", repr(C))]
 pub struct MutableMarkContext(pub u32, pub u32, pub u32);
 
 // List of proxy calls injected by the host in the plugin's runtime context.
@@ -85,8 +99,6 @@ extern "C" {
     // on their side.
     fn __mark_fresh_proxy(mark: u32) -> u32;
     fn __mark_parent_proxy(self_mark: u32) -> u32;
-    fn __mark_is_builtin_proxy(self_mark: u32) -> u32;
-    fn __mark_set_builtin_proxy(self_mark: u32, is_builtin: u32);
     fn __syntax_context_apply_mark_proxy(self_syntax_context: u32, mark: u32) -> u32;
     fn __syntax_context_outer_proxy(self_mark: u32) -> u32;
 
@@ -117,10 +129,7 @@ impl Mark {
         // targeting wasm32-*.
         #[cfg(not(all(feature = "__plugin_mode", target_arch = "wasm32")))]
         return with_marks(|marks| {
-            marks.push(MarkData {
-                parent,
-                is_builtin: false,
-            });
+            marks.push(MarkData { parent });
             Mark(marks.len() as u32 - 1)
         });
     }
@@ -149,33 +158,6 @@ impl Mark {
 
         #[cfg(not(all(feature = "__plugin_mode", target_arch = "wasm32")))]
         return with_marks(|marks| marks[self.0 as usize].parent);
-    }
-
-    #[inline]
-    pub fn is_builtin(self) -> bool {
-        #[cfg(all(feature = "__plugin_mode", target_arch = "wasm32"))]
-        return unsafe { __mark_is_builtin_proxy(self.0) != 0 };
-
-        #[cfg(not(all(feature = "__plugin_mode", target_arch = "wasm32")))]
-        {
-            assert_ne!(self, Mark::root());
-
-            with_marks(|marks| marks[self.0 as usize].is_builtin)
-        }
-    }
-
-    #[inline]
-    pub fn set_is_builtin(self, is_builtin: bool) {
-        #[cfg(all(feature = "__plugin_mode", target_arch = "wasm32"))]
-        unsafe {
-            __mark_set_builtin_proxy(self.0, is_builtin as u32)
-        }
-        #[cfg(not(all(feature = "__plugin_mode", target_arch = "wasm32")))]
-        {
-            assert_ne!(self, Mark::root());
-
-            with_marks(|marks| marks[self.0 as usize].is_builtin = is_builtin)
-        }
     }
 
     #[allow(unused_assignments)]
@@ -303,7 +285,6 @@ impl HygieneData {
                 outer_mark: Mark::root(),
                 prev_ctxt: SyntaxContext(0),
                 opaque: SyntaxContext(0),
-                opaque_and_semitransparent: SyntaxContext(0),
             }],
             markings: HashMap::default(),
         }
@@ -396,32 +377,16 @@ impl SyntaxContext {
         HygieneData::with(|data| {
             let syntax_contexts = &mut data.syntax_contexts;
             let mut opaque = syntax_contexts[self.0 as usize].opaque;
-            let opaque_and_semitransparent =
-                syntax_contexts[self.0 as usize].opaque_and_semitransparent;
 
             let prev_ctxt = opaque;
-            opaque = *data.markings.entry((prev_ctxt, mark)).or_insert_with(|| {
+            *data.markings.entry((prev_ctxt, mark)).or_insert_with(|| {
                 let new_opaque = SyntaxContext(syntax_contexts.len() as u32);
                 syntax_contexts.push(SyntaxContextData {
                     outer_mark: mark,
                     prev_ctxt,
                     opaque: new_opaque,
-                    opaque_and_semitransparent: new_opaque,
                 });
                 new_opaque
-            });
-
-            let prev_ctxt = self;
-            *data.markings.entry((prev_ctxt, mark)).or_insert_with(|| {
-                let new_opaque_and_semitransparent_and_transparent =
-                    SyntaxContext(syntax_contexts.len() as u32);
-                syntax_contexts.push(SyntaxContextData {
-                    outer_mark: mark,
-                    prev_ctxt,
-                    opaque,
-                    opaque_and_semitransparent,
-                });
-                new_opaque_and_semitransparent_and_transparent
             })
         })
     }

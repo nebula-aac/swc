@@ -1,48 +1,58 @@
 use std::{
+    borrow::Cow,
     fmt::Display,
     ops::{Deref, DerefMut},
 };
 
 use phf::phf_set;
-use scoped_tls::scoped_thread_local;
-use swc_atoms::{js_word, Atom};
+use swc_atoms::{fast::FastAtom, js_word, Atom};
 use swc_common::{
-    ast_node, util::take::Take, BytePos, EqIgnoreSpan, Span, Spanned, SyntaxContext, DUMMY_SP,
+    ast_node, util::take::Take, BytePos, EqIgnoreSpan, Mark, Span, Spanned, SyntaxContext, DUMMY_SP,
 };
 
 use crate::{typescript::TsTypeAnn, Expr};
 
 /// Identifier used as a pattern.
-#[derive(Spanned, Clone, Debug, PartialEq, Eq, Hash, EqIgnoreSpan)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(
     any(feature = "rkyv-impl"),
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 #[cfg_attr(
-    any(feature = "rkyv-impl"),
-    archive(bound(
-        serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace + \
-                     rkyv::ser::SharedSerializeRegistry",
-        deserialize = "__D: rkyv::de::SharedDeserializeRegistry"
-    ))
+    feature = "rkyv-impl",
+    rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source))
 )]
-#[cfg_attr(feature = "rkyv-impl", archive(check_bytes))]
-#[cfg_attr(feature = "rkyv-impl", archive_attr(repr(C)))]
+#[cfg_attr(
+    feature = "rkyv-impl",
+    rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))
+)]
+#[cfg_attr(
+    feature = "rkyv-impl",
+    rkyv(bytecheck(bounds(
+        __C: rkyv::validation::ArchiveContext,
+        __C::Error: rkyv::rancor::Source
+    )))
+)]
+#[cfg_attr(feature = "rkyv-impl", repr(C))]
 #[cfg_attr(feature = "serde-impl", derive(serde::Serialize, serde::Deserialize))]
 pub struct BindingIdent {
-    #[span]
     #[cfg_attr(feature = "serde-impl", serde(flatten))]
-    #[cfg_attr(feature = "__rkyv", omit_bounds)]
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
     pub id: Ident,
+
     #[cfg_attr(feature = "serde-impl", serde(default, rename = "typeAnnotation"))]
-    #[cfg_attr(feature = "__rkyv", omit_bounds)]
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
     pub type_ann: Option<Box<TsTypeAnn>>,
 }
 
-impl From<BindingIdent> for Box<Expr> {
-    fn from(bi: BindingIdent) -> Self {
-        Box::new(Expr::Ident(bi.id))
+impl Spanned for BindingIdent {
+    fn span(&self) -> Span {
+        match &self.type_ann {
+            Some(ann) => Span::new(self.id.span.lo(), ann.span().hi()),
+            None => self.id.span,
+        }
     }
 }
 
@@ -60,25 +70,47 @@ impl DerefMut for BindingIdent {
     }
 }
 
+impl AsRef<str> for BindingIdent {
+    fn as_ref(&self) -> &str {
+        &self.sym
+    }
+}
+
+impl From<BindingIdent> for Box<Expr> {
+    fn from(bi: BindingIdent) -> Self {
+        Box::new(Expr::Ident(bi.into()))
+    }
+}
+impl From<&'_ BindingIdent> for Ident {
+    fn from(bi: &'_ BindingIdent) -> Self {
+        Ident {
+            span: bi.span,
+            ctxt: bi.ctxt,
+            sym: bi.sym.clone(),
+            optional: bi.optional,
+        }
+    }
+}
+
 impl BindingIdent {
     /// See [`Ident::to_id`] for documentation.
     pub fn to_id(&self) -> Id {
-        self.id.to_id()
+        (self.sym.clone(), self.ctxt)
     }
 }
 
 impl Take for BindingIdent {
     fn dummy() -> Self {
-        BindingIdent {
-            id: Ident::dummy(),
-            type_ann: None,
-        }
+        Default::default()
     }
 }
 
 impl From<Ident> for BindingIdent {
     fn from(id: Ident) -> Self {
-        Self { id, type_ann: None }
+        BindingIdent {
+            id,
+            ..Default::default()
+        }
     }
 }
 
@@ -135,9 +167,14 @@ bridge_from!(BindingIdent, Ident, Id);
 /// There's a type named [Id] which only contains minimal information to
 /// distinguish identifiers.
 #[ast_node("Identifier")]
-#[derive(Eq, Hash)]
+#[derive(Eq, Hash, Default)]
 pub struct Ident {
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
     pub span: Span,
+
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
+    pub ctxt: SyntaxContext,
+
     #[cfg_attr(feature = "serde-impl", serde(rename = "value"))]
     pub sym: Atom,
 
@@ -152,13 +189,24 @@ impl From<BindingIdent> for Ident {
     }
 }
 
-impl From<&'_ str> for Ident {
-    fn from(bi: &str) -> Self {
-        Ident::new(bi.into(), DUMMY_SP)
+impl From<Atom> for Ident {
+    fn from(bi: Atom) -> Self {
+        Ident::new_no_ctxt(bi, DUMMY_SP)
     }
 }
+bridge_from!(Ident, Atom, &'_ str);
+bridge_from!(Ident, Atom, Cow<'_, str>);
+bridge_from!(Ident, Atom, String);
 
-scoped_thread_local!(static EQ_IGNORE_SPAN_IGNORE_CTXT: ());
+impl From<(Atom, Span)> for Ident {
+    fn from((sym, span): (Atom, Span)) -> Self {
+        Ident {
+            span,
+            sym,
+            ..Default::default()
+        }
+    }
+}
 
 impl EqIgnoreSpan for Ident {
     fn eq_ignore_span(&self, other: &Self) -> bool {
@@ -166,23 +214,19 @@ impl EqIgnoreSpan for Ident {
             return false;
         }
 
-        if self.span.ctxt == other.span.ctxt {
-            return true;
-        }
-
-        EQ_IGNORE_SPAN_IGNORE_CTXT.is_set()
+        self.ctxt.eq_ignore_span(&other.ctxt)
     }
 }
 
 impl From<Id> for Ident {
     fn from(id: Id) -> Self {
-        Ident::new(id.0, DUMMY_SP.with_ctxt(id.1))
+        Ident::new(id.0, DUMMY_SP, id.1)
     }
 }
 
 impl From<Ident> for Id {
     fn from(i: Ident) -> Self {
-        (i.sym, i.span.ctxt)
+        (i.sym, i.ctxt)
     }
 }
 
@@ -198,7 +242,7 @@ impl Ident {
     where
         F: FnOnce() -> Ret,
     {
-        EQ_IGNORE_SPAN_IGNORE_CTXT.set(&(), op)
+        SyntaxContext::within_ignored_ctxt(op)
     }
 
     /// Preserve syntax context while drop `span.lo` and `span.hi`.
@@ -210,7 +254,7 @@ impl Ident {
 
     /// Creates `Id` using `Atom` and `SyntaxContext` of `self`.
     pub fn to_id(&self) -> Id {
-        (self.sym.clone(), self.span.ctxt)
+        (self.sym.clone(), self.ctxt)
     }
 
     /// Returns true if `c` is a valid character for an identifier start.
@@ -307,10 +351,151 @@ impl Ident {
         Err(buf)
     }
 
+    /// Create a new identifier with the given prefix.
+    pub fn with_prefix(&self, prefix: &str) -> Ident {
+        Ident::new(
+            format!("{}{}", prefix, self.sym).into(),
+            self.span,
+            self.ctxt,
+        )
+    }
+
+    /// Create a private identifier that is unique in the file, but with the
+    /// same symbol.
+    pub fn into_private(self) -> Ident {
+        Self::new(
+            self.sym,
+            self.span,
+            SyntaxContext::empty().apply_mark(Mark::new()),
+        )
+    }
+
     #[inline]
     pub fn is_dummy(&self) -> bool {
         self.sym == js_word!("") && self.span.is_dummy()
     }
+
+    /// Create a new identifier with the given position.
+    pub fn with_pos(mut self, lo: BytePos, hi: BytePos) -> Ident {
+        self.span = Span::new(lo, hi);
+        self
+    }
+}
+
+#[ast_node("Identifier")]
+#[derive(Eq, Hash, Default, EqIgnoreSpan)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct IdentName {
+    #[cfg_attr(feature = "__rkyv", rkyv(omit_bounds))]
+    pub span: Span,
+
+    #[cfg_attr(feature = "serde-impl", serde(rename = "value"))]
+    pub sym: Atom,
+}
+
+impl From<Atom> for IdentName {
+    fn from(sym: Atom) -> Self {
+        IdentName {
+            span: DUMMY_SP,
+            sym,
+        }
+    }
+}
+
+impl From<(Atom, Span)> for IdentName {
+    fn from((sym, span): (Atom, Span)) -> Self {
+        IdentName { span, sym }
+    }
+}
+
+bridge_from!(IdentName, Atom, &'_ str);
+bridge_from!(IdentName, Atom, Cow<'_, str>);
+bridge_from!(IdentName, Atom, String);
+bridge_from!(IdentName, Ident, &'_ BindingIdent);
+bridge_from!(IdentName, Ident, BindingIdent);
+
+impl AsRef<str> for IdentName {
+    fn as_ref(&self) -> &str {
+        &self.sym
+    }
+}
+
+impl IdentName {
+    pub const fn new(sym: Atom, span: Span) -> Self {
+        Self { span, sym }
+    }
+}
+
+impl Take for IdentName {
+    fn dummy() -> Self {
+        Default::default()
+    }
+}
+
+impl From<Ident> for IdentName {
+    fn from(i: Ident) -> Self {
+        IdentName {
+            span: i.span,
+            sym: i.sym,
+        }
+    }
+}
+
+impl From<IdentName> for Ident {
+    fn from(i: IdentName) -> Self {
+        Ident {
+            span: i.span,
+            sym: i.sym,
+            ..Default::default()
+        }
+    }
+}
+
+bridge_from!(BindingIdent, Ident, Atom);
+bridge_from!(BindingIdent, Atom, &'_ str);
+bridge_from!(BindingIdent, Atom, Cow<'_, str>);
+bridge_from!(BindingIdent, Atom, String);
+
+impl From<IdentName> for BindingIdent {
+    fn from(i: IdentName) -> Self {
+        BindingIdent {
+            id: i.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// UnsafeId is a wrapper around [Id] that does not allocate, but extremely
+/// unsafe.
+///
+/// Do not use this unless you know what you are doing.
+///
+/// **Currently, it's considered as a unstable API and may be changed in the
+/// future without a semver bump.**
+pub type UnsafeId = (FastAtom, SyntaxContext);
+
+/// This is extremely unsafe so don't use it unless you know what you are doing.
+///
+/// # Safety
+///
+/// See [`FastAtom::new`] for constraints.
+///
+/// **Currently, it's considered as a unstable API and may be changed in the
+/// future without a semver bump.**
+pub unsafe fn unsafe_id(id: &Id) -> UnsafeId {
+    (FastAtom::new(&id.0), id.1)
+}
+
+/// This is extremely unsafe so don't use it unless you know what you are doing.
+///
+/// # Safety
+///
+/// See [`FastAtom::new`] for constraints.
+///
+/// **Currently, it's considered as a unstable API and may be changed in the
+/// future without a semver bump.**
+pub unsafe fn unsafe_id_from_ident(id: &Ident) -> UnsafeId {
+    (FastAtom::new(&id.sym), id.ctxt)
 }
 
 /// See [Ident] for documentation.
@@ -318,13 +503,25 @@ pub type Id = (Atom, SyntaxContext);
 
 impl Take for Ident {
     fn dummy() -> Self {
-        Ident::new(js_word!(""), DUMMY_SP)
+        Ident::new_no_ctxt(js_word!(""), DUMMY_SP)
     }
 }
 
 impl Display for Ident {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{:?}", self.sym, self.span.ctxt)
+        write!(f, "{}{:?}", self.sym, self.ctxt)
+    }
+}
+
+impl Display for IdentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.sym)
+    }
+}
+
+impl Display for BindingIdent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{:?}", self.sym, self.ctxt)
     }
 }
 
@@ -333,11 +530,7 @@ impl Display for Ident {
 impl<'a> arbitrary::Arbitrary<'a> for Ident {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let span = u.arbitrary()?;
-        let sym = u.arbitrary::<String>()?;
-        if sym.is_empty() {
-            return Err(arbitrary::Error::NotEnoughData);
-        }
-        let sym = sym.into();
+        let sym = u.arbitrary::<Atom>()?;
 
         let optional = u.arbitrary()?;
 
@@ -345,16 +538,18 @@ impl<'a> arbitrary::Arbitrary<'a> for Ident {
             span,
             sym,
             optional,
+            ctxt: Default::default(),
         })
     }
 }
 
 #[ast_node("PrivateName")]
-#[derive(Eq, Hash, EqIgnoreSpan)]
+#[derive(Eq, Hash, EqIgnoreSpan, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PrivateName {
     pub span: Span,
-    pub id: Ident,
+    #[cfg_attr(feature = "serde-impl", serde(rename = "value"))]
+    pub name: Atom,
 }
 
 impl AsRef<str> for Ident {
@@ -364,12 +559,22 @@ impl AsRef<str> for Ident {
 }
 
 impl Ident {
-    pub const fn new(sym: Atom, span: Span) -> Self {
+    pub const fn new(sym: Atom, span: Span, ctxt: SyntaxContext) -> Self {
         Ident {
             span,
+            ctxt,
             sym,
             optional: false,
         }
+    }
+
+    #[inline(never)]
+    pub fn new_private(sym: Atom, span: Span) -> Self {
+        Self::new(sym, span, SyntaxContext::empty().apply_mark(Mark::new()))
+    }
+
+    pub const fn new_no_ctxt(sym: Atom, span: Span) -> Self {
+        Self::new(sym, span, SyntaxContext::empty())
     }
 }
 
@@ -425,6 +630,8 @@ static RESSERVED_IN_STRICT_MODE: phf::Set<&str> = phf_set!(
     "yield",
 );
 
+static RESSERVED_IN_STRICT_BIND: phf::Set<&str> = phf_set!("eval", "arguments",);
+
 static RESERVED_IN_ES3: phf::Set<&str> = phf_set!(
     "abstract",
     "boolean",
@@ -444,7 +651,7 @@ static RESERVED_IN_ES3: phf::Set<&str> = phf_set!(
     "volatile",
 );
 
-pub trait IdentExt: AsRef<str> {
+pub trait EsReserved: AsRef<str> {
     fn is_reserved(&self) -> bool {
         RESERVED.contains(self.as_ref())
     }
@@ -457,15 +664,24 @@ pub trait IdentExt: AsRef<str> {
     }
 
     fn is_reserved_in_strict_bind(&self) -> bool {
-        ["eval", "arguments"].contains(&self.as_ref())
+        RESSERVED_IN_STRICT_BIND.contains(self.as_ref())
     }
 
     fn is_reserved_in_es3(&self) -> bool {
         RESERVED_IN_ES3.contains(self.as_ref())
     }
+
+    fn is_reserved_in_any(&self) -> bool {
+        RESERVED.contains(self.as_ref())
+            || RESSERVED_IN_STRICT_MODE.contains(self.as_ref())
+            || RESSERVED_IN_STRICT_BIND.contains(self.as_ref())
+            || RESERVED_IN_ES3.contains(self.as_ref())
+    }
 }
 
-impl IdentExt for Atom {}
-impl IdentExt for Ident {}
-impl IdentExt for &'_ str {}
-impl IdentExt for String {}
+impl EsReserved for Atom {}
+impl EsReserved for IdentName {}
+impl EsReserved for Ident {}
+impl EsReserved for BindingIdent {}
+impl EsReserved for &'_ str {}
+impl EsReserved for String {}

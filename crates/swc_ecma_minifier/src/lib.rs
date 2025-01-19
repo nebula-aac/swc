@@ -39,10 +39,12 @@
 #![allow(clippy::match_like_matches_macro)]
 
 use once_cell::sync::Lazy;
+use pass::mangle_names::mangle_names;
 use swc_common::{comments::Comments, pass::Repeated, sync::Lrc, SourceMap, SyntaxContext};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_optimization::debug_assert_valid;
 use swc_ecma_usage_analyzer::marks::Marks;
+use swc_ecma_utils::ExprCtx;
 use swc_ecma_visit::VisitMutWith;
 use swc_timer::timer;
 
@@ -53,12 +55,8 @@ use crate::{
     mode::{Minification, Mode},
     option::{CompressOptions, ExtraOptions, MinifyOptions},
     pass::{
-        expand_names::name_expander,
-        global_defs,
-        mangle_names::{idents_to_preserve, name_mangler},
-        mangle_props::mangle_properties,
-        merge_exports::merge_exports,
-        postcompress::postcompress_optimizer,
+        global_defs, mangle_names::idents_to_preserve, mangle_props::mangle_properties,
+        merge_exports::merge_exports, postcompress::postcompress_optimizer,
         precompress::precompress_optimizer,
     },
     // program_data::ModuleInfo,
@@ -78,6 +76,7 @@ mod mode;
 pub mod option;
 mod pass;
 mod program_data;
+mod size_hint;
 pub mod timing;
 mod util;
 
@@ -128,7 +127,11 @@ pub fn optimize(
     if let Some(_options) = &options.compress {
         let _timer = timer!("precompress");
 
-        n.visit_mut_with(&mut precompress_optimizer());
+        n.visit_mut_with(&mut precompress_optimizer(ExprCtx {
+            unresolved_ctxt: SyntaxContext::empty().apply_mark(marks.unresolved_mark),
+            is_unresolved_ref_safe: false,
+            in_strict: false,
+        }));
         debug_assert_valid(&n);
     }
 
@@ -172,7 +175,7 @@ pub fn optimize(
     if options.rename && DISABLE_BUGGY_PASSES {
         // toplevel.figure_out_scope(options.mangle);
         // TODO: Pass `options.mangle` to name expander.
-        n.visit_mut_with(&mut name_expander());
+        // n.visit_mut_with(&mut name_expander());
     }
 
     if let Some(ref mut t) = timings {
@@ -202,7 +205,6 @@ pub fn optimize(
 
             let mut v = pure_optimizer(
                 c,
-                None,
                 marks,
                 PureOptimizerConfig {
                     force_str_for_tpl: Minification.force_str_for_tpl(),
@@ -233,7 +235,7 @@ pub fn optimize(
         let _timer = timer!("mangle names");
         // TODO: base54.reset();
 
-        let preserved = idents_to_preserve(mangle.clone(), &n);
+        let preserved = idents_to_preserve(mangle, marks, &n);
 
         let chars = CharFreq::compute(
             &n,
@@ -242,12 +244,14 @@ pub fn optimize(
         )
         .compile();
 
-        n.visit_mut_with(&mut name_mangler(
-            mangle.clone(),
+        mangle_names(
+            &mut n,
+            mangle,
             preserved,
             chars,
             extra.top_level_mark,
-        ));
+            extra.mangle_name_cache.clone(),
+        );
 
         if let Some(property_mangle_options) = &mangle.props {
             mangle_properties(&mut n, property_mangle_options.clone(), chars);

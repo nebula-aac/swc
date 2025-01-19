@@ -23,14 +23,28 @@ use serde::Serializer;
 
 pub use self::{atom as js_word, Atom as JsWord};
 
+pub mod fast;
+
 /// Clone-on-write string.
 ///
 ///
 /// See [tendril] for more details.
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "rkyv-impl", derive(rkyv::bytecheck::CheckBytes))]
+#[cfg_attr(feature = "rkyv-impl", derive(bytecheck::CheckBytes))]
 #[cfg_attr(feature = "rkyv-impl", repr(C))]
 pub struct Atom(hstr::Atom);
+
+#[cfg(feature = "arbitrary")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arbitrary")))]
+impl<'a> arbitrary::Arbitrary<'a> for Atom {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let sym = u.arbitrary::<String>()?;
+        if sym.is_empty() {
+            return Err(arbitrary::Error::NotEnoughData);
+        }
+        Ok(Self(hstr::Atom::from(sym)))
+    }
+}
 
 fn _asserts() {
     // let _static_assert_size_eq = std::mem::transmute::<Atom, [usize; 1]>;
@@ -90,6 +104,13 @@ macro_rules! impl_from {
             }
         }
     };
+}
+
+impl From<hstr::Atom> for Atom {
+    #[inline(always)]
+    fn from(s: hstr::Atom) -> Self {
+        Atom(s)
+    }
 }
 
 impl PartialEq<str> for Atom {
@@ -162,7 +183,7 @@ impl<'de> serde::de::Deserialize<'de> for Atom {
 #[macro_export]
 macro_rules! atom {
     ($s:tt) => {{
-        $crate::Atom::new($crate::hstr::atom!($s))
+        $crate::Atom::from($crate::hstr::atom!($s))
     }};
 }
 
@@ -170,7 +191,7 @@ macro_rules! atom {
 #[macro_export]
 macro_rules! lazy_atom {
     ($s:tt) => {{
-        $crate::Atom::new($crate::hstr::atom!($s))
+        $crate::Atom::from($crate::hstr::atom!($s))
     }};
 }
 
@@ -187,14 +208,17 @@ impl rkyv::Archive for Atom {
     type Resolver = rkyv::string::StringResolver;
 
     #[allow(clippy::unit_arg)]
-    unsafe fn resolve(&self, pos: usize, resolver: Self::Resolver, out: *mut Self::Archived) {
-        rkyv::string::ArchivedString::resolve_from_str(self, pos, resolver, out)
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::string::ArchivedString::resolve_from_str(self, resolver, out)
     }
 }
 
 /// NOT A PUBLIC API
 #[cfg(feature = "rkyv-impl")]
-impl<S: rkyv::ser::Serializer + ?Sized> rkyv::Serialize<S> for Atom {
+impl<S: rancor::Fallible + rkyv::ser::Writer + ?Sized> rkyv::Serialize<S> for Atom
+where
+    <S as rancor::Fallible>::Error: rancor::Source,
+{
     fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
         String::serialize(&self.to_string(), serializer)
     }
@@ -204,9 +228,9 @@ impl<S: rkyv::ser::Serializer + ?Sized> rkyv::Serialize<S> for Atom {
 #[cfg(feature = "rkyv-impl")]
 impl<D> rkyv::Deserialize<Atom, D> for rkyv::string::ArchivedString
 where
-    D: ?Sized + rkyv::Fallible,
+    D: ?Sized + rancor::Fallible,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<Atom, <D as rkyv::Fallible>::Error> {
+    fn deserialize(&self, deserializer: &mut D) -> Result<Atom, <D as rancor::Fallible>::Error> {
         let s: String = self.deserialize(deserializer)?;
 
         Ok(Atom::new(s))

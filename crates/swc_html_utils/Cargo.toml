@@ -7,10 +7,10 @@ description = "Utils for HTML"
 documentation = "https://rustdoc.swc.rs/swc_html_utils/"
 edition = "2021"
 include = ["Cargo.toml", "src/**/*.rs", "data/**/*.json"]
-license = "Apache-2.0"
+license = { workspace = true }
 name = "swc_html_utils"
 repository = "https://github.com/swc-project/swc.git"
-version = "0.18.21"
+version = "5.0.0"
 
 [lib]
 bench = false
@@ -20,5 +20,5 @@ once_cell  = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
-swc_atoms  = { version = "0.6.5", path = "../swc_atoms" }
-swc_common = { version = "0.33.26", path = "../swc_common" }
+swc_atoms  = { version = "3.0.3", path = "../swc_atoms" }
+swc_common = { version = "5.0.0", path = "../swc_common" }

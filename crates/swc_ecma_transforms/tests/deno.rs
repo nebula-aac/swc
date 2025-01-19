@@ -4,7 +4,7 @@
 ))]
 use std::path::PathBuf;
 
-use swc_common::{chain, Mark};
+use swc_common::Mark;
 use swc_ecma_parser::Syntax;
 use swc_ecma_transforms::{fixer, helpers::inject_helpers, hygiene, resolver};
 use swc_ecma_transforms_proposal::{
@@ -28,7 +28,7 @@ fn run_test(input: PathBuf) {
             let unresolved_mark = Mark::new();
             let top_level_mark = Mark::new();
 
-            chain!(
+            (
                 resolver(unresolved_mark, top_level_mark, true),
                 decorator_2022_03(),
                 explicit_resource_management(),
@@ -36,13 +36,15 @@ fn run_test(input: PathBuf) {
                 typescript(
                     typescript::Config {
                         verbatim_module_syntax: false,
+                        native_class_properties: false,
                         import_not_used_as_values: typescript::ImportsNotUsedAsValues::Remove,
                         no_empty_export: true,
                         import_export_assign_config:
                             typescript::TsImportExportAssignConfig::Preserve,
                         ts_enum_is_mutable: true,
                     },
-                    top_level_mark
+                    unresolved_mark,
+                    top_level_mark,
                 ),
                 fixer(None),
                 hygiene(),

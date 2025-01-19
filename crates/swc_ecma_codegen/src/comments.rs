@@ -1,3 +1,5 @@
+use swc_common::comments::Comment;
+
 use super::*;
 
 macro_rules! write_comments {
@@ -52,7 +54,7 @@ macro_rules! write_comments {
     }};
 }
 
-impl<'a, W, S: SourceMapper> Emitter<'a, W, S>
+impl<W, S: SourceMapper> Emitter<'_, W, S>
 where
     W: WriteJs,
     S: SourceMapperExt,
@@ -80,6 +82,18 @@ where
     pub(super) fn emit_leading_comments(&mut self, mut pos: BytePos, is_hi: bool) -> Result {
         if pos.is_dummy() {
             return Ok(());
+        }
+
+        if pos.is_pure() {
+            write_comments!(
+                self,
+                false,
+                Some(vec![Comment {
+                    kind: CommentKind::Block,
+                    span: DUMMY_SP,
+                    text: "#__PURE__".into(),
+                }])
+            );
         }
 
         let comments = match self.comments {

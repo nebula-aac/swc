@@ -1,9 +1,13 @@
 use swc_common::util::take::Take;
 use swc_ecma_ast::*;
 use swc_ecma_utils::stack_size::maybe_grow_default;
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{noop_visit_mut_type, VisitMut, VisitMutWith};
 
-use crate::{type_to_none, unreachable_visit_mut_type};
+use crate::type_to_none;
+
+pub fn strip_type() -> impl VisitMut {
+    StripType::default()
+}
 
 /// This Module will strip all types/generics/interface/declares
 /// and type import/export
@@ -11,7 +15,7 @@ use crate::{type_to_none, unreachable_visit_mut_type};
 pub(crate) struct StripType {}
 
 impl VisitMut for StripType {
-    unreachable_visit_mut_type!();
+    noop_visit_mut_type!(fail);
 
     type_to_none!(visit_mut_opt_ts_type, Box<TsType>);
 
@@ -80,6 +84,7 @@ impl VisitMut for StripType {
         n.accessibility = None;
         n.is_override = false;
         n.is_abstract = false;
+        n.is_optional = false;
         n.visit_mut_children_with(self);
     }
 
@@ -200,8 +205,16 @@ impl VisitMut for StripType {
     }
 
     fn visit_mut_stmts(&mut self, n: &mut Vec<Stmt>) {
-        n.retain(should_retain_stmt);
         n.visit_mut_children_with(self);
+        n.retain(|s| !matches!(s, Stmt::Empty(e) if e.span.is_dummy()));
+    }
+
+    fn visit_mut_stmt(&mut self, n: &mut Stmt) {
+        if should_retain_stmt(n) {
+            n.visit_mut_children_with(self);
+        } else if !n.is_empty() {
+            n.take();
+        }
     }
 
     fn visit_mut_ts_import_equals_decl(&mut self, _: &mut TsImportEqualsDecl) {

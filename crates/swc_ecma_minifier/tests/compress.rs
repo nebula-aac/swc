@@ -16,7 +16,7 @@ use anyhow::Error;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use swc_common::{
-    comments::SingleThreadedComments,
+    comments::{Comments, SingleThreadedComments},
     errors::{Handler, HANDLER},
     sync::Lrc,
     util::take::Take,
@@ -36,7 +36,7 @@ use swc_ecma_minifier::{
 };
 use swc_ecma_parser::{
     lexer::{input::SourceFileInput, Lexer},
-    EsConfig, Parser, Syntax,
+    EsSyntax, Parser, Syntax,
 };
 use swc_ecma_testing::{exec_node_js, JsExecOptions};
 use swc_ecma_transforms_base::{
@@ -45,7 +45,7 @@ use swc_ecma_transforms_base::{
     resolver,
 };
 use swc_ecma_utils::drop_span;
-use swc_ecma_visit::{FoldWith, VisitMut, VisitMutWith};
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 use testing::{assert_eq, unignore_fixture, DebugUsingDisplay, NormalizedOutput};
 
 fn load_txt(filename: &str) -> Vec<String> {
@@ -144,6 +144,7 @@ fn run(
     handler: &Handler,
     input: &Path,
     config: &str,
+    comments: Option<&dyn Comments>,
     mangle: Option<TestMangleOptions>,
     skip_hygiene: bool,
 ) -> Option<Program> {
@@ -153,7 +154,6 @@ fn run(
         let (_module, mut config) = parse_compressor_config(cm.clone(), config);
 
         let fm = cm.load_file(input).expect("failed to load input.js");
-        let comments = SingleThreadedComments::default();
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Input"), fm.src);
 
@@ -183,7 +183,7 @@ fn run(
         let minification_start = Instant::now();
 
         let lexer = Lexer::new(
-            Syntax::Es(EsConfig {
+            Syntax::Es(EsSyntax {
                 jsx: true,
                 ..Default::default()
             }),
@@ -247,6 +247,7 @@ fn run(
             &ExtraOptions {
                 unresolved_mark,
                 top_level_mark,
+                mangle_name_cache: None,
             },
         );
         let end = Instant::now();
@@ -260,7 +261,7 @@ fn run(
             output.visit_mut_with(&mut hygiene())
         }
 
-        let output = output.fold_with(&mut fixer(None));
+        let output = output.apply(&mut fixer(None));
 
         let end = Instant::now();
         tracing::info!(
@@ -315,6 +316,8 @@ fn custom_fixture(input: PathBuf) {
     eprintln!("---- {} -----\n{}", Color::Green.paint("Config"), config);
 
     testing::run_test2(false, |cm, handler| {
+        let comments = SingleThreadedComments::default();
+
         let mangle = dir.join("mangle.json");
         let mangle = read_to_string(mangle).ok();
         if let Some(mangle) = &mangle {
@@ -327,13 +330,21 @@ fn custom_fixture(input: PathBuf) {
         let mangle: Option<TestMangleOptions> =
             mangle.map(|s| serde_json::from_str(&s).expect("failed to deserialize mangle.json"));
 
-        let output = run(cm.clone(), &handler, &input, &config, mangle, false);
+        let output = run(
+            cm.clone(),
+            &handler,
+            &input,
+            &config,
+            Some(&comments),
+            mangle,
+            false,
+        );
         let output_module = match output {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        let output = print(cm, &[output_module], false, false);
+        let output = print(cm, &[output_module], Some(&comments), false, false);
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Output"), output);
 
@@ -356,13 +367,23 @@ fn projects(input: PathBuf) {
     eprintln!("---- {} -----\n{}", Color::Green.paint("Config"), config);
 
     testing::run_test2(false, |cm, handler| {
-        let output = run(cm.clone(), &handler, &input, &config, None, false);
+        let comments = SingleThreadedComments::default();
+
+        let output = run(
+            cm.clone(),
+            &handler,
+            &input,
+            &config,
+            Some(&comments),
+            None,
+            false,
+        );
         let output_module = match output {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        let output = print(cm.clone(), &[output_module], false, false);
+        let output = print(cm.clone(), &[output_module], Some(&comments), false, false);
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Output"), output);
 
@@ -374,6 +395,7 @@ fn projects(input: PathBuf) {
                 &handler,
                 &input,
                 r#"{ "defaults": true, "toplevel": true, "passes": 3 }"#,
+                Some(&comments),
                 Some(TestMangleOptions::Normal(MangleOptions {
                     top_level: Some(true),
                     ..Default::default()
@@ -385,7 +407,7 @@ fn projects(input: PathBuf) {
                 None => return Ok(()),
             };
 
-            print(cm, &[output_module], true, true)
+            print(cm, &[output_module], Some(&comments), true, true)
         };
 
         eprintln!(
@@ -422,11 +444,14 @@ fn projects_bench(input: PathBuf) {
         .join("benches-full");
 
     testing::run_test2(false, |cm, handler| {
+        let comments = SingleThreadedComments::default();
+
         let output = run(
             cm.clone(),
             &handler,
             &input,
             r#"{ "defaults": true, "toplevel": false, "passes": 3 }"#,
+            Some(&comments),
             None,
             false,
         );
@@ -435,7 +460,7 @@ fn projects_bench(input: PathBuf) {
             None => return Ok(()),
         };
 
-        let output = print(cm, &[output_module], false, false);
+        let output = print(cm, &[output_module], Some(&comments), false, false);
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Output"), output);
 
@@ -473,21 +498,37 @@ fn fixture(input: PathBuf) {
             );
         }
 
+        let comments = SingleThreadedComments::default();
+
         let mangle: Option<TestMangleOptions> = mangle.map(|s| TestMangleOptions::parse(&s));
 
-        let output = run(cm.clone(), &handler, &input, &config, mangle, false);
+        let output = run(
+            cm.clone(),
+            &handler,
+            &input,
+            &config,
+            Some(&comments),
+            mangle,
+            false,
+        );
         let output_program = match output {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        let output = print(cm.clone(), &[output_program.clone()], false, false);
+        let output = print(
+            cm.clone(),
+            &[output_program.clone()],
+            Some(&comments),
+            false,
+            false,
+        );
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Output"), output);
 
         let expected = {
             let expected = read_to_string(dir.join("output.js")).unwrap();
-            let fm = cm.new_source_file(FileName::Custom("expected.js".into()), expected);
+            let fm = cm.new_source_file(FileName::Custom("expected.js".into()).into(), expected);
             let lexer = Lexer::new(
                 Default::default(),
                 Default::default(),
@@ -498,7 +539,7 @@ fn fixture(input: PathBuf) {
             let expected = parser.parse_program().map_err(|err| {
                 err.into_diagnostic(&handler).emit();
             })?;
-            let mut expected = expected.fold_with(&mut fixer(None));
+            let mut expected = expected.apply(&mut fixer(None));
             expected = drop_span(expected);
 
             match &mut expected {
@@ -521,20 +562,26 @@ fn fixture(input: PathBuf) {
                 return Ok(());
             }
 
-            if print(cm.clone(), &[actual], false, false)
-                == print(cm.clone(), &[normalized_expected], false, false)
+            if print(cm.clone(), &[actual], Some(&comments), false, false)
+                == print(
+                    cm.clone(),
+                    &[normalized_expected],
+                    Some(&comments),
+                    false,
+                    false,
+                )
             {
                 return Ok(());
             }
 
-            print(cm.clone(), &[expected], false, false)
+            print(cm.clone(), &[expected], Some(&comments), false, false)
         };
         {
             // Check output.teraer.js
             let identical = (|| -> Option<()> {
                 let expected = {
                     let expected = read_to_string(dir.join("output.terser.js")).ok()?;
-                    let fm = cm.new_source_file(FileName::Anon, expected);
+                    let fm = cm.new_source_file(FileName::Anon.into(), expected);
                     let lexer = Lexer::new(
                         Default::default(),
                         Default::default(),
@@ -548,7 +595,7 @@ fn fixture(input: PathBuf) {
                             err.into_diagnostic(&handler).emit();
                         })
                         .ok()?;
-                    let mut expected = expected.fold_with(&mut fixer(None));
+                    let mut expected = expected.apply(fixer(None));
                     expected = drop_span(expected);
                     match &mut expected {
                         Program::Module(m) => {
@@ -570,13 +617,19 @@ fn fixture(input: PathBuf) {
                         return Some(());
                     }
 
-                    if print(cm.clone(), &[actual], false, false)
-                        == print(cm.clone(), &[normalized_expected], false, false)
+                    if print(cm.clone(), &[actual], Some(&comments), false, false)
+                        == print(
+                            cm.clone(),
+                            &[normalized_expected],
+                            Some(&comments),
+                            false,
+                            false,
+                        )
                     {
                         return Some(());
                     }
 
-                    print(cm.clone(), &[expected], false, false)
+                    print(cm.clone(), &[expected], Some(&comments), false, false)
                 };
 
                 if output == expected {
@@ -623,7 +676,13 @@ fn fixture(input: PathBuf) {
             }
         }
 
-        let output_str = print(cm, &[drop_span(output_program)], false, false);
+        let output_str = print(
+            cm,
+            &[drop_span(output_program)],
+            Some(&comments),
+            false,
+            false,
+        );
 
         if env::var("UPDATE").map(|s| s == "1").unwrap_or(false) {
             let _ = catch_unwind(|| {
@@ -643,10 +702,11 @@ fn fixture(input: PathBuf) {
 fn print<N: swc_ecma_codegen::Node>(
     cm: Lrc<SourceMap>,
     nodes: &[N],
+    comments: Option<&dyn Comments>,
     minify: bool,
     skip_semi: bool,
 ) -> String {
-    let mut buf = vec![];
+    let mut buf = Vec::new();
 
     {
         let mut wr: Box<dyn WriteJs> = Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None));
@@ -657,7 +717,7 @@ fn print<N: swc_ecma_codegen::Node>(
         let mut emitter = Emitter {
             cfg: swc_ecma_codegen::Config::default().with_minify(minify),
             cm,
-            comments: None,
+            comments,
             wr,
         };
 
@@ -675,12 +735,15 @@ fn full(input: PathBuf) {
     let config = find_config(dir);
     eprintln!("---- {} -----\n{}", Color::Green.paint("Config"), config);
 
+    let comments = SingleThreadedComments::default();
+
     testing::run_test2(false, |cm, handler| {
         let output = run(
             cm.clone(),
             &handler,
             &input,
             &config,
+            Some(&comments),
             Some(TestMangleOptions::Normal(MangleOptions {
                 top_level: Some(true),
                 ..Default::default()
@@ -692,7 +755,7 @@ fn full(input: PathBuf) {
             None => return Ok(()),
         };
 
-        let output = print(cm, &[output_module], true, true);
+        let output = print(cm, &[output_module], Some(&comments), true, true);
 
         eprintln!("---- {} -----\n{}", Color::Green.paint("Output"), output);
 

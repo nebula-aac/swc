@@ -11,17 +11,19 @@ use anyhow::{anyhow, Context, Error};
 use path_clean::PathClean;
 use pathdiff::diff_paths;
 use swc_atoms::JsWord;
-use swc_common::{FileName, Mark, Span, DUMMY_SP};
+use swc_common::{FileName, Mark, Span, SyntaxContext, DUMMY_SP};
 use swc_ecma_ast::*;
 use swc_ecma_loader::resolve::{Resolution, Resolve};
 use swc_ecma_utils::{quote_ident, ExprFactory};
 use tracing::{debug, info, warn, Level};
 
-pub(crate) enum Resolver {
+#[derive(Default)]
+pub enum Resolver {
     Real {
         base: FileName,
-        resolver: Box<dyn ImportResolver>,
+        resolver: Arc<dyn ImportResolver>,
     },
+    #[default]
     Default,
 }
 
@@ -44,18 +46,22 @@ impl Resolver {
     ) -> Expr {
         let src = self.resolve(src);
 
-        Expr::Call(CallExpr {
+        CallExpr {
             span: DUMMY_SP,
-            callee: quote_ident!(DUMMY_SP.apply_mark(unresolved_mark), "require").as_callee(),
+            callee: quote_ident!(
+                SyntaxContext::empty().apply_mark(unresolved_mark),
+                "require"
+            )
+            .as_callee(),
             args: vec![Lit::Str(Str {
                 span: src_span,
                 raw: None,
                 value: src,
             })
             .as_arg()],
-
-            type_args: Default::default(),
-        })
+            ..Default::default()
+        }
+        .into()
     }
 }
 
@@ -90,10 +96,21 @@ where
     config: Config,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub base_dir: Option<PathBuf>,
     pub resolve_fully: bool,
+    pub file_extension: String,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            file_extension: crate::util::Config::default_js_ext(),
+            resolve_fully: bool::default(),
+            base_dir: Option::default(),
+        }
+    }
 }
 
 impl<R> NodeImportResolver<R>
@@ -156,13 +173,13 @@ where
             };
 
             let is_resolved_as_non_js = if let Some(ext) = target_path.extension() {
-                ext != "js"
+                ext.to_string_lossy() != self.config.file_extension
             } else {
                 false
             };
 
             let is_resolved_as_js = if let Some(ext) = target_path.extension() {
-                ext == "js"
+                ext.to_string_lossy() == self.config.file_extension
             } else {
                 false
             };
@@ -173,31 +190,42 @@ where
                 false
             };
 
+            let file_stem_matches = if let Some(stem) = target_path.file_stem() {
+                stem == orig_filename
+            } else {
+                false
+            };
+
             if self.config.resolve_fully && is_resolved_as_js {
             } else if orig_filename == "index" {
                 // Import: `./foo/index`
                 // Resolved: `./foo/index.js`
 
                 if self.config.resolve_fully {
-                    target_path.set_file_name("index.js");
+                    target_path.set_file_name(format!("index.{}", self.config.file_extension));
                 } else {
                     target_path.set_file_name("index");
                 }
-            } else if is_resolved_as_index && is_resolved_as_js && orig_filename != "index.js" {
+            } else if is_resolved_as_index
+                && is_resolved_as_js
+                && orig_filename != format!("index.{}", self.config.file_extension)
+            {
                 // Import: `./foo`
                 // Resolved: `./foo/index.js`
 
                 target_path.pop();
+            } else if is_resolved_as_non_js && self.config.resolve_fully && file_stem_matches {
+                target_path.set_extension(self.config.file_extension.clone());
             } else if !is_resolved_as_js && !is_resolved_as_index && !is_exact {
                 target_path.set_file_name(orig_filename);
             } else if is_resolved_as_non_js && is_exact {
                 if let Some(ext) = Path::new(orig_filename).extension() {
                     target_path.set_extension(ext);
                 } else {
-                    target_path.set_extension("js");
+                    target_path.set_extension(self.config.file_extension.clone());
                 }
             } else if self.config.resolve_fully && is_resolved_as_non_js {
-                target_path.set_extension("js");
+                target_path.set_extension(self.config.file_extension.clone());
             } else if is_resolved_as_non_js && is_resolved_as_index {
                 if orig_filename == "index" {
                     target_path.set_extension("");

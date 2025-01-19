@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 use indexmap::IndexSet;
 use petgraph::{algo::tarjan_scc, Direction::Incoming};
 use rustc_hash::FxHashSet;
-use swc_atoms::JsWord;
+use swc_atoms::{atom, JsWord};
 use swc_common::{
     collections::{AHashMap, AHashSet, ARandomState},
     pass::{CompilerPass, Repeated},
@@ -16,10 +16,10 @@ use swc_ecma_transforms_base::{
     perf::{cpu_count, ParVisitMut, Parallel},
 };
 use swc_ecma_utils::{
-    collect_decls, find_pat_ids, ExprCtx, ExprExt, IsEmpty, ModuleItemLike, StmtLike,
+    collect_decls, find_pat_ids, ExprCtx, ExprExt, IsEmpty, ModuleItemLike, StmtLike, Value::Known,
 };
 use swc_ecma_visit::{
-    as_folder, noop_visit_mut_type, noop_visit_type, Fold, Visit, VisitMut, VisitMutWith, VisitWith,
+    noop_visit_mut_type, noop_visit_type, visit_mut_pass, Visit, VisitMut, VisitMutWith, VisitWith,
 };
 use swc_fast_graph::digraph::FastDiGraphMap;
 use tracing::{debug, span, Level};
@@ -30,11 +30,12 @@ use crate::debug_assert_valid;
 pub fn dce(
     config: Config,
     unresolved_mark: Mark,
-) -> impl Fold + VisitMut + Repeated + CompilerPass {
-    as_folder(TreeShaker {
+) -> impl Pass + VisitMut + Repeated + CompilerPass {
+    visit_mut_pass(TreeShaker {
         expr_ctx: ExprCtx {
             unresolved_ctxt: SyntaxContext::empty().apply_mark(unresolved_mark),
             is_unresolved_ref_safe: false,
+            in_strict: false,
         },
         config,
         changed: false,
@@ -96,7 +97,7 @@ struct TreeShaker {
 }
 
 impl CompilerPass for TreeShaker {
-    fn name() -> Cow<'static, str> {
+    fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("tree-shaker")
     }
 }
@@ -126,9 +127,9 @@ impl Data {
     }
 
     /// Add an edge to dependency graph
-    fn add_dep_edge(&mut self, from: Id, to: Id, assign: bool) {
-        let from = self.node(&from);
-        let to = self.node(&to);
+    fn add_dep_edge(&mut self, from: &Id, to: &Id, assign: bool) {
+        let from = self.node(from);
+        let to = self.node(to);
 
         match self.graph.edge_weight_mut(from, to) {
             Some(info) => {
@@ -310,7 +311,7 @@ impl Analyzer<'_> {
 
     /// Mark `id` as used
     fn add(&mut self, id: Id, assign: bool) {
-        if id.0 == "arguments" {
+        if id.0 == atom!("arguments") {
             self.scope.found_arguemnts = true;
         }
 
@@ -334,8 +335,7 @@ impl Analyzer<'_> {
 
             while let Some(s) = scope {
                 for component in &s.ast_path {
-                    self.data
-                        .add_dep_edge(component.clone(), id.clone(), assign)
+                    self.data.add_dep_edge(component, &id, assign);
                 }
 
                 if s.kind == ScopeKind::Fn && !s.ast_path.is_empty() {
@@ -523,7 +523,7 @@ impl Visit for Analyzer<'_> {
 
         if !self.in_var_decl {
             if let Pat::Ident(i) = p {
-                self.add(i.id.to_id(), true);
+                self.add(i.to_id(), true);
             }
         }
     }
@@ -655,6 +655,24 @@ impl TreeShaker {
                 .map(|v| v.usage == 0)
                 .unwrap_or_default()
     }
+
+    /// Drops RHS from `null && foo`
+    fn optimize_bin_expr(&mut self, n: &mut Expr) {
+        let Expr::Bin(b) = n else {
+            return;
+        };
+
+        if b.op == op!("&&") && b.left.as_pure_bool(&self.expr_ctx) == Known(false) {
+            *n = *b.left.take();
+            self.changed = true;
+            return;
+        }
+
+        if b.op == op!("||") && b.left.as_pure_bool(&self.expr_ctx) == Known(true) {
+            *n = *b.left.take();
+            self.changed = true;
+        }
+    }
 }
 
 impl VisitMut for TreeShaker {
@@ -683,11 +701,8 @@ impl VisitMut for TreeShaker {
         self.in_block_stmt = old_in_block_stmt;
     }
 
-    fn visit_mut_function(&mut self, n: &mut Function) {
-        let old_in_fn = self.in_fn;
-        self.in_fn = true;
-        n.visit_mut_children_with(self);
-        self.in_fn = old_in_fn;
+    fn visit_mut_class_members(&mut self, members: &mut Vec<ClassMember>) {
+        self.visit_mut_par(cpu_count() * 8, members);
     }
 
     fn visit_mut_decl(&mut self, n: &mut Decl) {
@@ -704,6 +719,10 @@ impl VisitMut for TreeShaker {
             }
             Decl::Class(c) => {
                 if self.can_drop_binding(c.ident.to_id(), false)
+                    && c.class
+                        .super_class
+                        .as_deref()
+                        .map_or(true, |e| !e.may_have_side_effects(&self.expr_ctx))
                     && c.class.body.iter().all(|m| match m {
                         ClassMember::Method(m) => !matches!(m.key, PropName::Computed(..)),
                         ClassMember::ClassProp(m) => {
@@ -763,6 +782,8 @@ impl VisitMut for TreeShaker {
 
     fn visit_mut_expr(&mut self, n: &mut Expr) {
         n.visit_mut_children_with(self);
+
+        self.optimize_bin_expr(n);
 
         if let Expr::Call(CallExpr {
             callee: Callee::Expr(callee),
@@ -827,6 +848,30 @@ impl VisitMut for TreeShaker {
         }
     }
 
+    fn visit_mut_expr_or_spreads(&mut self, n: &mut Vec<ExprOrSpread>) {
+        self.visit_mut_par(cpu_count() * 8, n);
+    }
+
+    fn visit_mut_exprs(&mut self, n: &mut Vec<Box<Expr>>) {
+        self.visit_mut_par(cpu_count() * 8, n);
+    }
+
+    fn visit_mut_for_head(&mut self, n: &mut ForHead) {
+        match n {
+            ForHead::VarDecl(..) | ForHead::UsingDecl(..) => {}
+            ForHead::Pat(v) => {
+                v.visit_mut_with(self);
+            }
+        }
+    }
+
+    fn visit_mut_function(&mut self, n: &mut Function) {
+        let old_in_fn = self.in_fn;
+        self.in_fn = true;
+        n.visit_mut_children_with(self);
+        self.in_fn = old_in_fn;
+    }
+
     fn visit_mut_import_specifiers(&mut self, ss: &mut Vec<ImportSpecifier>) {
         ss.retain(|s| {
             let local = match s {
@@ -878,6 +923,41 @@ impl VisitMut for TreeShaker {
         })
     }
 
+    fn visit_mut_module_item(&mut self, n: &mut ModuleItem) {
+        match n {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(i)) => {
+                let is_for_side_effect = i.specifiers.is_empty();
+
+                i.visit_mut_with(self);
+
+                if !self.config.preserve_imports_with_side_effects
+                    && !is_for_side_effect
+                    && i.specifiers.is_empty()
+                {
+                    debug!("Dropping an import because it's not used");
+                    self.changed = true;
+                    *n = EmptyStmt { span: DUMMY_SP }.into();
+                }
+            }
+            _ => {
+                n.visit_mut_children_with(self);
+            }
+        }
+        debug_assert_valid(n);
+    }
+
+    fn visit_mut_module_items(&mut self, s: &mut Vec<ModuleItem>) {
+        self.visit_mut_stmt_likes(s);
+    }
+
+    fn visit_mut_opt_vec_expr_or_spreads(&mut self, n: &mut Vec<Option<ExprOrSpread>>) {
+        self.visit_mut_par(cpu_count() * 8, n);
+    }
+
+    fn visit_mut_prop_or_spreads(&mut self, n: &mut Vec<PropOrSpread>) {
+        self.visit_mut_par(cpu_count() * 8, n);
+    }
+
     fn visit_mut_script(&mut self, m: &mut Script) {
         let _tracing = span!(Level::ERROR, "tree-shaker", pass = self.pass).entered();
 
@@ -904,33 +984,6 @@ impl VisitMut for TreeShaker {
         HELPERS.set(&Helpers::new(true), || {
             m.visit_mut_children_with(self);
         })
-    }
-
-    fn visit_mut_module_item(&mut self, n: &mut ModuleItem) {
-        match n {
-            ModuleItem::ModuleDecl(ModuleDecl::Import(i)) => {
-                let is_for_side_effect = i.specifiers.is_empty();
-
-                i.visit_mut_with(self);
-
-                if !self.config.preserve_imports_with_side_effects
-                    && !is_for_side_effect
-                    && i.specifiers.is_empty()
-                {
-                    debug!("Dropping an import because it's not used");
-                    self.changed = true;
-                    *n = ModuleItem::Stmt(Stmt::Empty(EmptyStmt { span: DUMMY_SP }));
-                }
-            }
-            _ => {
-                n.visit_mut_children_with(self);
-            }
-        }
-        debug_assert_valid(n);
-    }
-
-    fn visit_mut_module_items(&mut self, s: &mut Vec<ModuleItem>) {
-        self.visit_mut_stmt_likes(s);
     }
 
     fn visit_mut_stmt(&mut self, s: &mut Stmt) {
@@ -970,20 +1023,21 @@ impl VisitMut for TreeShaker {
                 self.changed = true;
 
                 if exprs.is_empty() {
-                    *s = Stmt::Empty(EmptyStmt { span: DUMMY_SP });
+                    *s = EmptyStmt { span: DUMMY_SP }.into();
                     return;
                 } else {
-                    *s = Stmt::Expr(ExprStmt {
+                    *s = ExprStmt {
                         span,
                         expr: Expr::from_exprs(exprs),
-                    });
+                    }
+                    .into();
                 }
             }
         }
 
         if let Stmt::Decl(Decl::Var(v)) = s {
             if v.decls.is_empty() {
-                *s = Stmt::Empty(EmptyStmt { span: DUMMY_SP });
+                *s = EmptyStmt { span: DUMMY_SP }.into();
             }
         }
 
@@ -994,21 +1048,17 @@ impl VisitMut for TreeShaker {
         self.visit_mut_stmt_likes(s);
     }
 
-    fn visit_mut_var_decl_or_expr(&mut self, n: &mut VarDeclOrExpr) {
-        match n {
-            VarDeclOrExpr::VarDecl(..) => {}
-            VarDeclOrExpr::Expr(v) => {
-                v.visit_mut_with(self);
-            }
+    fn visit_mut_unary_expr(&mut self, n: &mut UnaryExpr) {
+        if matches!(n.op, op!("delete")) {
+            return;
         }
+        n.visit_mut_children_with(self);
     }
 
-    fn visit_mut_for_head(&mut self, n: &mut ForHead) {
-        match n {
-            ForHead::VarDecl(..) | ForHead::UsingDecl(..) => {}
-            ForHead::Pat(v) => {
-                v.visit_mut_with(self);
-            }
+    #[cfg_attr(feature = "debug", tracing::instrument(skip_all))]
+    fn visit_mut_using_decl(&mut self, n: &mut UsingDecl) {
+        for decl in n.decls.iter_mut() {
+            decl.init.visit_mut_with(self);
         }
     }
 
@@ -1017,6 +1067,15 @@ impl VisitMut for TreeShaker {
         self.var_decl_kind = Some(n.kind);
         n.visit_mut_children_with(self);
         self.var_decl_kind = old_var_decl_kind;
+    }
+
+    fn visit_mut_var_decl_or_expr(&mut self, n: &mut VarDeclOrExpr) {
+        match n {
+            VarDeclOrExpr::VarDecl(..) => {}
+            VarDeclOrExpr::Expr(v) => {
+                v.visit_mut_with(self);
+            }
+        }
     }
 
     fn visit_mut_var_declarator(&mut self, v: &mut VarDeclarator) {
@@ -1030,10 +1089,10 @@ impl VisitMut for TreeShaker {
             };
 
             if can_drop
-                && self.can_drop_binding(i.id.to_id(), self.var_decl_kind == Some(VarDeclKind::Var))
+                && self.can_drop_binding(i.to_id(), self.var_decl_kind == Some(VarDeclKind::Var))
             {
                 self.changed = true;
-                debug!("Dropping {} because it's not used", i.id);
+                debug!("Dropping {} because it's not used", i);
                 v.name.take();
             }
         }
@@ -1053,29 +1112,6 @@ impl VisitMut for TreeShaker {
 
     fn visit_mut_with_stmt(&mut self, n: &mut WithStmt) {
         n.obj.visit_mut_with(self);
-    }
-
-    fn visit_mut_unary_expr(&mut self, n: &mut UnaryExpr) {
-        if matches!(n.op, op!("delete")) {
-            return;
-        }
-        n.visit_mut_children_with(self);
-    }
-
-    fn visit_mut_prop_or_spreads(&mut self, n: &mut Vec<PropOrSpread>) {
-        self.visit_mut_par(cpu_count() * 8, n);
-    }
-
-    fn visit_mut_expr_or_spreads(&mut self, n: &mut Vec<ExprOrSpread>) {
-        self.visit_mut_par(cpu_count() * 8, n);
-    }
-
-    fn visit_mut_opt_vec_expr_or_spreads(&mut self, n: &mut Vec<Option<ExprOrSpread>>) {
-        self.visit_mut_par(cpu_count() * 8, n);
-    }
-
-    fn visit_mut_exprs(&mut self, n: &mut Vec<Box<Expr>>) {
-        self.visit_mut_par(cpu_count() * 8, n);
     }
 }
 

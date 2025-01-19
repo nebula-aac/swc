@@ -1,17 +1,15 @@
 use std::path::{Path, PathBuf};
 
-use swc_common::{chain, sync::Lrc, Mark, SourceMap, SyntaxContext};
+use swc_common::{sync::Lrc, Mark, SourceMap, SyntaxContext};
 use swc_ecma_ast::*;
 use swc_ecma_codegen::Emitter;
-use swc_ecma_parser::{lexer::Lexer, EsConfig, Parser, StringInput, Syntax, TsConfig};
+use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::{fixer::fixer, resolver};
-use swc_ecma_visit::{
-    as_folder, visit_mut_obj_and_computed, Fold, FoldWith, VisitMut, VisitMutWith,
-};
+use swc_ecma_visit::{visit_mut_obj_and_computed, visit_mut_pass, VisitMut, VisitMutWith};
 use testing::{fixture, run_test2, NormalizedOutput};
 
 pub fn print(cm: Lrc<SourceMap>, program: &Program) -> String {
-    let mut buf = vec![];
+    let mut buf = Vec::new();
     {
         let mut emitter = Emitter {
             cfg: Default::default(),
@@ -33,7 +31,7 @@ pub fn print(cm: Lrc<SourceMap>, program: &Program) -> String {
 fn run<F, P>(syntax: Syntax, input: &Path, op: F)
 where
     F: FnOnce() -> P,
-    P: Fold,
+    P: Pass,
 {
     let dir = input.parent().unwrap();
     let output = dir.join(format!(
@@ -53,7 +51,7 @@ where
 
         let mut folder = op();
 
-        let program = program.fold_with(&mut folder);
+        let program = program.apply(&mut folder);
 
         let actual = print(cm, &program);
         let actual = NormalizedOutput::from(actual);
@@ -68,7 +66,7 @@ where
 #[fixture("tests/resolver/**/input.js")]
 fn test_resolver(input: PathBuf) {
     run(
-        Syntax::Es(EsConfig {
+        Syntax::Es(EsSyntax {
             jsx: true,
             ..Default::default()
         }),
@@ -76,30 +74,32 @@ fn test_resolver(input: PathBuf) {
         || {
             let unresolved_mark = Mark::fresh(Mark::root());
 
-            chain!(
+            (
                 resolver(unresolved_mark, Mark::new(), false),
-                as_folder(TsHygiene { unresolved_mark }),
-                fixer(None)
+                visit_mut_pass(TsHygiene { unresolved_mark }),
+                fixer(None),
             )
         },
     );
 }
 
 #[fixture("tests/ts-resolver/**/input.ts")]
+#[fixture("tests/ts-resolver/**/input.tsx")]
 fn test_ts_resolver(input: PathBuf) {
     run(
-        Syntax::Typescript(TsConfig {
+        Syntax::Typescript(TsSyntax {
             decorators: true,
+            tsx: input.extension().filter(|ext| *ext == "tsx").is_some(),
             ..Default::default()
         }),
         &input,
         || {
             let unresolved_mark = Mark::fresh(Mark::root());
 
-            chain!(
+            (
                 resolver(unresolved_mark, Mark::new(), true),
-                as_folder(TsHygiene { unresolved_mark }),
-                fixer(None)
+                visit_mut_pass(TsHygiene { unresolved_mark }),
+                fixer(None),
             )
         },
     );
@@ -113,14 +113,14 @@ impl VisitMut for TsHygiene {
     visit_mut_obj_and_computed!();
 
     fn visit_mut_ident(&mut self, i: &mut Ident) {
-        if SyntaxContext::empty().apply_mark(self.unresolved_mark) == i.span.ctxt {
+        if SyntaxContext::empty().apply_mark(self.unresolved_mark) == i.ctxt {
             println!("ts_hygiene: {} is unresolved", i.sym);
             return;
         }
 
-        let ctxt = format!("{:?}", i.span.ctxt).replace('#', "");
+        let ctxt = format!("{:?}", i.ctxt).replace('#', "");
         i.sym = format!("{}__{}", i.sym, ctxt).into();
-        i.span = i.span.with_ctxt(SyntaxContext::empty());
+        i.ctxt = SyntaxContext::empty();
     }
 
     fn visit_mut_prop_name(&mut self, n: &mut PropName) {

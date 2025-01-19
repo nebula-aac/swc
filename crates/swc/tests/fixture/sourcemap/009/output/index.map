@@ -1,12 +1,11 @@
 {
-  "mappings": "AAAA;;;;;CAKC;AACDA,QAAQC,GAAG,CAAC,IAAIC,QAAQC,KAAK",
+  "mappings": "AAAA;;;;;CAKC,GACDA,QAAQC,GAAG,CAAC,IAAIC,QAAQC,KAAK",
   "names": [
     "console",
     "log",
     "Error",
     "stack"
   ],
-  "rangeMappings": ";;;;;;",
   "sources": [
     "../../input/index.js"
   ],

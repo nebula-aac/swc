@@ -40,8 +40,27 @@ impl Analyzer {
         }
     }
 
+    fn reserve_decl(&mut self, len: usize, belong_to_fn_scope: bool) {
+        if belong_to_fn_scope {
+            match self.scope.kind {
+                ScopeKind::Fn => {
+                    self.scope.reserve_decl(len);
+                }
+                ScopeKind::Block => {
+                    self.hoisted_vars.reserve(len);
+                }
+            }
+        } else {
+            self.scope.reserve_decl(len);
+        }
+    }
+
     fn add_usage(&mut self, id: Id) {
         self.scope.add_usage(id);
+    }
+
+    fn reserve_usage(&mut self, len: usize) {
+        self.scope.reserve_usage(len);
     }
 
     fn with_scope<F>(&mut self, kind: ScopeKind, op: F)
@@ -66,6 +85,7 @@ impl Analyzer {
             op(&mut v);
             if !v.hoisted_vars.is_empty() {
                 debug_assert!(matches!(v.scope.kind, ScopeKind::Block));
+                self.reserve_usage(v.hoisted_vars.len());
                 v.hoisted_vars.clone().into_iter().for_each(|id| {
                     // For variables declared in block scope using `var` and `function`,
                     // We should create a fake usage in the block to prevent conflicted
@@ -74,6 +94,7 @@ impl Analyzer {
                 });
                 match self.scope.kind {
                     ScopeKind::Fn => {
+                        self.reserve_decl(v.hoisted_vars.len(), true);
                         v.hoisted_vars
                             .into_iter()
                             .for_each(|id| self.add_decl(id, true));
@@ -218,7 +239,7 @@ impl Visit for Analyzer {
                     self.add_decl(id.to_id(), true);
                 }
 
-                f.function.visit_with(self)
+                f.visit_with(self);
             }
             DefaultDecl::TsInterfaceDecl(_) => {}
         }
@@ -240,7 +261,7 @@ impl Visit for Analyzer {
         maybe_grow_default(|| e.visit_children_with(self));
 
         if let Expr::Ident(i) = e {
-            self.add_usage(i.to_id())
+            self.add_usage(i.to_id());
         }
 
         self.is_pat_decl = old_is_pat_decl;
@@ -250,7 +271,14 @@ impl Visit for Analyzer {
         self.add_decl(f.ident.to_id(), true);
 
         // https://github.com/swc-project/swc/issues/6819
-        let has_rest = f.function.params.iter().any(|p| p.pat.is_rest());
+        //
+        // We need to check for assign pattern because safari has a bug.
+        // https://github.com/swc-project/swc/issues/9015
+        let has_rest = f
+            .function
+            .params
+            .iter()
+            .any(|p| p.pat.is_rest() || p.pat.is_assign());
         if has_rest {
             self.add_usage(f.ident.to_id());
         }
@@ -274,7 +302,14 @@ impl Visit for Analyzer {
                 v.add_decl(id.to_id(), true);
                 v.with_fn_scope(|v| {
                     // https://github.com/swc-project/swc/issues/6819
-                    if f.function.params.iter().any(|p| p.pat.is_rest()) {
+                    //
+                    // We need to check for assign pattern because safari has a bug.
+                    // https://github.com/swc-project/swc/issues/9015
+                    if f.function
+                        .params
+                        .iter()
+                        .any(|p| p.pat.is_rest() || p.pat.is_assign())
+                    {
                         v.add_usage(id.to_id());
                     }
 

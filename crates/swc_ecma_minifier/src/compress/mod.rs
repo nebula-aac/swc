@@ -6,16 +6,13 @@ use std::{borrow::Cow, fmt::Write, time::Instant};
 
 #[cfg(feature = "pretty_assertions")]
 use pretty_assertions::assert_eq;
-use swc_common::{
-    chain,
-    pass::{CompilerPass, Optional, Repeated},
-};
+use swc_common::pass::{CompilerPass, Optional, Repeated};
 use swc_ecma_ast::*;
 use swc_ecma_transforms_optimization::simplify::{
     dead_branch_remover, expr_simplifier, ExprSimplifierConfig,
 };
 use swc_ecma_usage_analyzer::{analyzer::UsageAnalyzer, marks::Marks};
-use swc_ecma_visit::{as_folder, noop_visit_mut_type, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{noop_visit_mut_type, visit_mut_pass, VisitMut, VisitMutWith, VisitWith};
 use swc_timer::timer;
 use tracing::{debug, error};
 
@@ -54,15 +51,15 @@ where
         mode,
     };
 
-    chain!(
-        as_folder(compressor),
+    (
+        visit_mut_pass(compressor),
         Optional {
             enabled: options.evaluate || options.side_effects,
-            visitor: as_folder(expr_simplifier(
+            visitor: visit_mut_pass(expr_simplifier(
                 marks.unresolved_mark,
-                ExprSimplifierConfig {}
-            ))
-        }
+                ExprSimplifierConfig {},
+            )),
+        },
     )
 }
 
@@ -79,7 +76,7 @@ struct Compressor<'a> {
 }
 
 impl CompilerPass for Compressor<'_> {
-    fn name() -> Cow<'static, str> {
+    fn name(&self) -> Cow<'static, str> {
         "compressor".into()
     }
 }
@@ -188,6 +185,9 @@ impl Compressor<'_> {
 
             let start_time = now();
 
+            #[cfg(feature = "debug")]
+            let start = n.dump();
+
             let mut visitor = expr_simplifier(self.marks.unresolved_mark, ExprSimplifierConfig {});
             n.apply(&mut visitor);
 
@@ -196,7 +196,10 @@ impl Compressor<'_> {
                 debug!("compressor: Simplified expressions");
                 #[cfg(feature = "debug")]
                 {
-                    debug!("===== Simplified =====\n{}", dump(&*n, false));
+                    debug!(
+                        "===== Simplified =====\n{start}===== ===== ===== =====\n{}",
+                        n.dump()
+                    );
                 }
             }
 
@@ -229,7 +232,6 @@ impl Compressor<'_> {
 
             let mut visitor = pure_optimizer(
                 self.options,
-                None,
                 self.marks,
                 PureOptimizerConfig {
                     enable_join_vars: self.pass > 1,
@@ -359,7 +361,7 @@ impl VisitMut for Compressor<'_> {
 struct DebugUsingDisplay<'a>(pub &'a str);
 
 #[cfg(feature = "debug")]
-impl<'a> Debug for DebugUsingDisplay<'a> {
+impl Debug for DebugUsingDisplay<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(self.0, f)
     }

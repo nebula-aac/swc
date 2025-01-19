@@ -1,8 +1,7 @@
 //// [classWithConstructors.ts]
+import { _ as _call_super } from "@swc/helpers/_/_call_super";
 import { _ as _class_call_check } from "@swc/helpers/_/_class_call_check";
 import { _ as _inherits } from "@swc/helpers/_/_inherits";
-import { _ as _create_super } from "@swc/helpers/_/_create_super";
-var NonGeneric;
 (function(NonGeneric) {
     var C = function C(x) {
         "use strict";
@@ -20,10 +19,9 @@ var NonGeneric;
     var D = /*#__PURE__*/ function(C2) {
         "use strict";
         _inherits(D, C2);
-        var _super = _create_super(D);
         function D() {
             _class_call_check(this, D);
-            return _super.apply(this, arguments);
+            return _call_super(this, D, arguments);
         }
         return D;
     }(C2);
@@ -31,7 +29,6 @@ var NonGeneric;
     var d2 = new D(1); // ok
     var d3 = new D(''); // ok
 })(NonGeneric || (NonGeneric = {}));
-var Generics;
 (function(Generics) {
     var C = function C(x) {
         "use strict";
@@ -49,10 +46,9 @@ var Generics;
     var D = /*#__PURE__*/ function(C2) {
         "use strict";
         _inherits(D, C2);
-        var _super = _create_super(D);
         function D() {
             _class_call_check(this, D);
-            return _super.apply(this, arguments);
+            return _call_super(this, D, arguments);
         }
         return D;
     }(C2);
@@ -60,3 +56,4 @@ var Generics;
     var d2 = new D(1); // ok
     var d3 = new D(''); // ok
 })(Generics || (Generics = {}));
+var NonGeneric, Generics;

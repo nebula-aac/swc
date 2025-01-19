@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry;
+use std::{collections::hash_map::Entry, mem};
 
 use swc_atoms::JsWord;
 use swc_common::{collections::AHashMap, errors::HANDLER, Span};
@@ -80,12 +80,6 @@ impl DuplicateExports {
 impl Visit for DuplicateExports {
     noop_visit_type!();
 
-    fn visit_ts_module_decl(&mut self, d: &TsModuleDecl) {
-        if !d.declare {
-            d.visit_children_with(self);
-        }
-    }
-
     fn visit_export_default_decl(&mut self, d: &ExportDefaultDecl) {
         if match &d.decl {
             DefaultDecl::Fn(FnExpr { function: f, .. }) if f.body.is_none() => true,
@@ -97,7 +91,7 @@ impl Visit for DuplicateExports {
 
         d.visit_children_with(self);
 
-        self.add(&Ident::new("default".into(), d.span));
+        self.add(&Ident::new_no_ctxt("default".into(), d.span));
     }
 
     fn visit_export_default_expr(&mut self, d: &ExportDefaultExpr) {
@@ -108,7 +102,7 @@ impl Visit for DuplicateExports {
             _ => {}
         }
 
-        self.add(&Ident::new("default".into(), d.span));
+        self.add(&Ident::new_no_ctxt("default".into(), d.span));
     }
 
     fn visit_export_default_specifier(&mut self, s: &ExportDefaultSpecifier) {
@@ -135,13 +129,24 @@ impl Visit for DuplicateExports {
         };
     }
 
+    /// Noop. Just to ensure that the visitor do not recurse into stmt.
+    fn visit_stmt(&mut self, _: &Stmt) {}
+
+    fn visit_ts_export_assignment(&mut self, n: &TsExportAssignment) {
+        self.add_export_assign(n.span);
+    }
+
     fn visit_ts_import_equals_decl(&mut self, n: &TsImportEqualsDecl) {
         if n.is_export && !n.is_type_only {
             self.add(&n.id)
         }
     }
 
-    fn visit_ts_export_assignment(&mut self, n: &TsExportAssignment) {
-        self.add_export_assign(n.span);
+    fn visit_ts_module_decl(&mut self, d: &TsModuleDecl) {
+        if !d.declare {
+            let old = mem::take(self);
+            d.visit_children_with(self);
+            *self = old;
+        }
     }
 }

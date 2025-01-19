@@ -1,3 +1,5 @@
+import { Assumptions } from "./assumptions";
+
 export interface Plugin {
     (module: Program): Program;
 }
@@ -27,7 +29,7 @@ export interface JsMinifyOptions {
 
     keep_fnames?: boolean;
 
-    module?: boolean;
+    module?: boolean | "unknown";
 
     safari10?: boolean;
 
@@ -109,7 +111,7 @@ export interface JsFormatOptions {
      * Currently noop.
      * @alias inline_script
      */
-    inlineScript?: number;
+    inlineScript?: boolean;
 
     /**
      * Currently noop.
@@ -302,12 +304,44 @@ export interface TerserCompressOptions {
 export interface TerserMangleOptions {
     props?: TerserManglePropertiesOptions;
 
+    /**
+     * Pass `true` to mangle names declared in the top level scope.
+     */
+    topLevel?: boolean;
+
+    /**
+     * @deprecated An alias for compatibility with terser.
+     */
     toplevel?: boolean;
 
+    /**
+     * Pass `true` to not mangle class names.
+     */
+    keepClassNames?: boolean;
+
+    /**
+     * @deprecated An alias for compatibility with terser.
+     */
     keep_classnames?: boolean;
 
+    /**
+     * Pass `true` to not mangle function names.
+     */
+    keepFnNames?: boolean;
+
+    /**
+     * @deprecated An alias for compatibility with terser.
+     */
     keep_fnames?: boolean;
 
+    /**
+     * Pass `true` to not mangle private props.
+     */
+    keepPrivateProps?: boolean;
+
+    /**
+     * @deprecated An alias for compatibility with terser.
+     */
     keep_private_props?: boolean;
 
     ie8?: boolean;
@@ -576,6 +610,7 @@ export interface EnvConfig {
 }
 
 export interface JscConfig {
+    assumptions?: Assumptions;
     loose?: boolean;
 
     /**
@@ -606,6 +641,8 @@ export interface JscConfig {
 
         /**
          * Preserve `with` in imports and exports.
+         *
+         * @deprecated Use `keepImportAssertions` instead.
          */
         keepImportAttributes?: boolean;
 
@@ -631,9 +668,31 @@ export interface JscConfig {
         plugins?: Array<[string, Record<string, any>]>;
 
         /**
+         * Run Wasm plugins before stripping TypeScript or decorators.
+         *
+         * See https://github.com/swc-project/swc/issues/9132 for more details.
+         */
+        runPluginFirst?: boolean;
+
+        /**
          * Disable builtin transforms. If enabled, only Wasm plugins are used.
          */
         disableBuiltinTransformsForInternalTesting?: boolean;
+
+        /**
+         * Emit isolated dts files for each module.
+         */
+        emitIsolatedDts?: boolean;
+
+        /**
+         * Disable all lint rules.
+         */
+        disableAllLints?: boolean;
+
+        /**
+         * Keep import assertions.
+         */
+        keepImportAssertions?: boolean;
     };
 
     baseUrl?: string;
@@ -658,6 +717,8 @@ export type JscTarget =
     | "es2020"
     | "es2021"
     | "es2022"
+    | "es2023"
+    | "es2024"
     | "esnext";
 
 export type ParserConfig = TsParserConfig | EsParserConfig;
@@ -782,12 +843,12 @@ export interface TransformConfig {
     optimizer?: OptimizerConfig;
 
     /**
-     * https://swc.rs/docs/configuring-swc.html#jsctransformlegacydecorator
+     * https://swc.rs/docs/configuration/compilation#jsctransformlegacydecorator
      */
     legacyDecorator?: boolean;
 
     /**
-     * https://swc.rs/docs/configuring-swc.html#jsctransformdecoratormetadata
+     * https://swc.rs/docs/configuration/compilation#jsctransformdecoratormetadata
      */
     decoratorMetadata?: boolean;
 
@@ -2377,11 +2438,7 @@ export interface TsPropertySignature extends Node, HasSpan {
     computed: boolean;
     optional: boolean;
 
-    init?: Expression;
-    params: TsFnParameter[];
-
     typeAnnotation?: TsTypeAnnotation;
-    typeParams?: TsTypeParameterDeclaration;
 }
 
 export interface TsGetterSignature extends Node, HasSpan {
